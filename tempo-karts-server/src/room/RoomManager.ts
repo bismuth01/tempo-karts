@@ -36,6 +36,7 @@ type ActiveBombState = {
   placedAt: number;
   explodeAt: number;
   radius: number;
+  damage: number;
   touchRadius: number;
 };
 
@@ -64,6 +65,7 @@ type TickResult = {
 const PLAYER_SPAWN: Vec2 = { x: 800, y: 600 };
 const CRATE_RESPAWN_MS = 60_000;
 const WEAPON_DURATION_MS = 40_000;
+const RESPAWN_DELAY_MS = 7_000;
 const BOMB_TIMER_MS = 5_000;
 const BULLET_STREAM_MS = 6_000;
 const WEAPON_POOL: WeaponType[] = ['rocket', 'bomb', 'bullet'];
@@ -299,7 +301,7 @@ export class RoomManager {
     return { ok: false };
   }
 
-  updatePosition(code: string, playerId: string, patch: Partial<Pick<PlayerState, 'position' | 'velocity' | 'rotation' | 'hp'>>) {
+  updatePosition(code: string, playerId: string, patch: Partial<Pick<PlayerState, 'position' | 'velocity' | 'rotation'>>) {
     const room = this.rooms.get(code.toUpperCase());
     if (!room) {
       return null;
@@ -311,10 +313,13 @@ export class RoomManager {
       return null;
     }
 
+    if (!player.isAlive) {
+      return null;
+    }
+
     if (patch.position) player.position = patch.position;
     if (patch.velocity) player.velocity = patch.velocity;
     if (typeof patch.rotation === 'number') player.rotation = patch.rotation;
-    if (typeof patch.hp === 'number') player.hp = patch.hp;
 
     player.updatedAt = Date.now();
     room.lastUpdatedAt = Date.now();
@@ -359,6 +364,10 @@ export class RoomManager {
     const player = room.players.get(playerId);
     if (!player) {
       return { error: 'Player not found' as const };
+    }
+
+    if (!player.isAlive) {
+      return { error: 'Player is dead' as const };
     }
 
     const activeWeapon = player.activeWeaponType;
@@ -461,6 +470,10 @@ export class RoomManager {
       return { error: 'Player not found' as const };
     }
 
+    if (!player.isAlive) {
+      return { error: 'Player is dead' as const };
+    }
+
     if (player.activeWeaponType !== null) {
       return { error: 'Player already has an active weapon' as const };
     }
@@ -553,6 +566,8 @@ export class RoomManager {
       velocity: { x: 0, y: 0 },
       rotation: 0,
       hp: 100,
+      isAlive: true,
+      respawnAt: null,
       kills: 0,
       deaths: 0,
       activeWeaponType: null,
@@ -601,6 +616,17 @@ export class RoomManager {
         player.activeWeaponType = null;
         player.activeWeaponGrantedAt = null;
         player.activeWeaponExpiresAt = null;
+        player.updatedAt = now;
+        changed = true;
+      }
+
+      if (!player.isAlive && player.respawnAt !== null && now >= player.respawnAt) {
+        player.isAlive = true;
+        player.respawnAt = null;
+        player.hp = 100;
+        player.position = { ...PLAYER_SPAWN };
+        player.velocity = { x: 0, y: 0 };
+        player.rotation = 0;
         player.updatedAt = now;
         changed = true;
       }
@@ -660,6 +686,7 @@ export class RoomManager {
       placedAt: now,
       explodeAt: now + BOMB_TIMER_MS,
       radius: BOMB_RADIUS,
+      damage: BOMB_DAMAGE,
       touchRadius: BOMB_TOUCH_RADIUS
     };
 
@@ -727,7 +754,7 @@ export class RoomManager {
       const touchRadiusSq = bomb.touchRadius * bomb.touchRadius;
 
       for (const player of room.players.values()) {
-        if (player.id === bomb.ownerPlayerId) {
+        if (player.id === bomb.ownerPlayerId || !player.isAlive) {
           continue;
         }
 
@@ -764,7 +791,7 @@ export class RoomManager {
 
     const radiusSq = bomb.radius * bomb.radius;
     for (const player of room.players.values()) {
-      if (player.id === bomb.ownerPlayerId || player.id === toucherId) {
+      if (player.id === bomb.ownerPlayerId || player.id === toucherId || !player.isAlive) {
         continue;
       }
 
@@ -801,7 +828,7 @@ export class RoomManager {
   private advanceBulletStreams(room: RoomRecord, now: number, attackEvents: AttackEvent[]) {
     for (const [streamId, stream] of room.activeBulletStreams.entries()) {
       const owner = room.players.get(stream.ownerPlayerId);
-      if (!owner) {
+      if (!owner || !owner.isAlive) {
         room.activeBulletStreams.delete(streamId);
         continue;
       }
@@ -904,7 +931,7 @@ export class RoomManager {
     const radiusSq = radius * radius;
 
     for (const player of room.players.values()) {
-      if (player.id === shooterId) {
+      if (player.id === shooterId || !player.isAlive) {
         continue;
       }
 
@@ -931,7 +958,7 @@ export class RoomManager {
     }
 
     const target = room.players.get(targetPlayerId);
-    if (!target) {
+    if (!target || !target.isAlive) {
       return { applied: false, killed: false, hpAfter: 0 };
     }
 
@@ -942,7 +969,10 @@ export class RoomManager {
     if (target.hp <= 0) {
       killed = true;
       target.deaths += 1;
-      target.hp = 100;
+      target.hp = 0;
+      target.isAlive = false;
+      target.respawnAt = now + RESPAWN_DELAY_MS;
+      target.velocity = { x: 0, y: 0 };
       target.activeWeaponType = null;
       target.activeWeaponGrantedAt = null;
       target.activeWeaponExpiresAt = null;

@@ -14,7 +14,6 @@ export type PositionPayload = {
   position: Vec2;
   velocity?: Vec2;
   rotation?: number;
-  hp?: number;
   ts?: number;
 };
 

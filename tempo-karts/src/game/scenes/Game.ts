@@ -32,6 +32,7 @@ type DomHudRefs = {
     weaponIcon: HTMLCanvasElement;
     copyButton: HTMLButtonElement;
     copyFeedback: HTMLDivElement;
+    respawnCountdown: HTMLDivElement;
 };
 
 type HudFrameName =
@@ -109,6 +110,7 @@ export class Game extends Scene
     private hudFrameCache = new Map<string, string>();
     private lastAimDirection = new Phaser.Math.Vector2(0, 1);
     private placedBombVisuals = new Map<string, Phaser.GameObjects.Image>();
+    private localIsAlive = true;
 
     constructor ()
     {
@@ -143,6 +145,27 @@ export class Game extends Scene
         if (this.escapeKey && Phaser.Input.Keyboard.JustDown(this.escapeKey))
         {
             this.exitToMainMenu();
+            return;
+        }
+
+        const localState = this.getLocalPlayerState();
+        if (localState)
+        {
+            this.syncLocalAliveVisibility(localState);
+            this.updateRespawnCountdown(localState);
+        }
+        else
+        {
+            this.localIsAlive = true;
+            this.player.setVisible(true);
+            this.updateRespawnCountdown(null);
+        }
+
+        if (localState && !localState.isAlive)
+        {
+            this.player.setVelocity(0, 0);
+            this.updateRemotePlayerHudPositions();
+            this.updateLocalWeaponHudFromSession();
             return;
         }
 
@@ -212,6 +235,8 @@ export class Game extends Scene
         {
             this.player.setPosition(localSnapshot.position.x, localSnapshot.position.y);
             this.applyDirectionToSprite(this.player, localSnapshot.velocity.x, localSnapshot.velocity.y);
+            this.syncLocalAliveVisibility(localSnapshot, true);
+            this.updateRespawnCountdown(localSnapshot);
         }
 
         this.bindMultiplayerEvents();
@@ -270,16 +295,25 @@ export class Game extends Scene
         const deltaX = payload.velocity?.x ?? payload.position.x - remote.x;
         const deltaY = payload.velocity?.y ?? payload.position.y - remote.y;
 
-        remote.setPosition(payload.position.x, payload.position.y);
-        this.applyDirectionToSprite(remote, deltaX, deltaY);
-
         const remoteState = session.room.players.find((player) => player.id === payload.playerId);
         if (remoteState)
         {
+            if (!remoteState.isAlive)
+            {
+                this.setRemoteEntityVisibility(payload.playerId, false);
+                return;
+            }
+
+            this.setRemoteEntityVisibility(payload.playerId, true);
+            remote.setPosition(payload.position.x, payload.position.y);
+            this.applyDirectionToSprite(remote, deltaX, deltaY);
             this.syncRemotePlayerHud(remoteState);
         }
         else
         {
+            this.setRemoteEntityVisibility(payload.playerId, true);
+            remote.setPosition(payload.position.x, payload.position.y);
+            this.applyDirectionToSprite(remote, deltaX, deltaY);
             this.updateRemoteHudPosition(payload.playerId);
         }
     };
@@ -293,6 +327,12 @@ export class Game extends Scene
         }
 
         session.room = payload.room;
+        const me = payload.room.players.find((player) => player.id === session.playerId);
+        if (me)
+        {
+            this.syncLocalAliveVisibility(me);
+            this.updateRespawnCountdown(me);
+        }
         this.hydrateRemotePlayersFromRoom(payload.room);
         this.syncCratesFromRoom(payload.room);
         this.refreshHudFromRoom(payload.room);
@@ -428,7 +468,14 @@ export class Game extends Scene
             }
 
             remoteIds.add(player.id);
+            if (!player.isAlive)
+            {
+                this.setRemoteEntityVisibility(player.id, false);
+                return;
+            }
+
             const remote = this.ensureRemotePlayer(player.id, player.position.x, player.position.y);
+            this.setRemoteEntityVisibility(player.id, true);
             remote.setPosition(player.position.x, player.position.y);
             this.applyDirectionToSprite(remote, player.velocity.x, player.velocity.y);
             this.syncRemotePlayerHud(player);
@@ -481,6 +528,73 @@ export class Game extends Scene
         this.removeRemotePlayerHud(playerId);
     }
 
+    private setRemoteEntityVisibility (playerId: string, visible: boolean)
+    {
+        const remote = this.remotePlayers.get(playerId);
+        if (remote)
+        {
+            remote.setVisible(visible);
+        }
+
+        const hud = this.remotePlayerHud.get(playerId);
+        if (hud)
+        {
+            hud.walletText.setVisible(visible);
+            hud.healthBg.setVisible(visible);
+            hud.healthFill.setVisible(visible);
+        }
+    }
+
+    private getLocalPlayerState ()
+    {
+        const session = this.multiplayerSession;
+        if (!session)
+        {
+            return null;
+        }
+
+        return session.room.players.find((player) => player.id === session.playerId) ?? null;
+    }
+
+    private syncLocalAliveVisibility (player: PlayerState, forcePosition = false)
+    {
+        if (!player.isAlive)
+        {
+            this.player.setVisible(false);
+            this.player.setVelocity(0, 0);
+            this.localIsAlive = false;
+            return;
+        }
+
+        const shouldSyncPosition = forcePosition || !this.localIsAlive;
+        this.player.setVisible(true);
+        if (shouldSyncPosition)
+        {
+            this.player.setPosition(player.position.x, player.position.y);
+            this.applyDirectionToSprite(this.player, player.velocity.x, player.velocity.y);
+        }
+        this.localIsAlive = true;
+    }
+
+    private updateRespawnCountdown (player: PlayerState | null)
+    {
+        if (!this.hudDom)
+        {
+            return;
+        }
+
+        if (!player || player.isAlive || !player.respawnAt)
+        {
+            this.hudDom.respawnCountdown.style.display = 'none';
+            this.hudDom.respawnCountdown.textContent = '';
+            return;
+        }
+
+        const seconds = Math.max(0, Math.ceil((player.respawnAt - Date.now()) / 1000));
+        this.hudDom.respawnCountdown.textContent = `RESPAWNING IN ${seconds}s`;
+        this.hudDom.respawnCountdown.style.display = 'block';
+    }
+
     private ensureRemotePlayerHud (playerId: string)
     {
         let hud = this.remotePlayerHud.get(playerId);
@@ -517,9 +631,16 @@ export class Game extends Scene
             return;
         }
 
+        if (!player.isAlive)
+        {
+            this.setRemoteEntityVisibility(player.id, false);
+            return;
+        }
+
         const hud = this.ensureRemotePlayerHud(player.id);
         hud.walletText.setText(this.getRemoteWalletLabel(player));
         this.applyHealthBar(hud.healthFill, player.hp, 68);
+        this.setRemoteEntityVisibility(player.id, true);
         this.updateRemoteHudPosition(player.id);
     }
 
@@ -615,6 +736,11 @@ export class Game extends Scene
         }
 
         const meState = session.room.players.find((player) => player.id === session.playerId);
+        if (meState && !meState.isAlive)
+        {
+            return;
+        }
+
         if (meState && this.hasActiveWeapon(meState))
         {
             return;
@@ -676,7 +802,7 @@ export class Game extends Scene
         }
 
         const me = session.room.players.find((player) => player.id === session.playerId);
-        if (!me || !me.activeWeaponType)
+        if (!me || !me.isAlive || !me.activeWeaponType)
         {
             return;
         }
@@ -938,7 +1064,6 @@ export class Game extends Scene
                 y: body.velocity.y
             },
             rotation: this.player.rotation,
-            hp: localPlayer?.hp ?? 100,
             ts: Date.now()
         };
 
@@ -984,6 +1109,7 @@ export class Game extends Scene
         this.cratePickupAttemptAt.clear();
         this.placedBombVisuals.forEach((bomb) => bomb.destroy());
         this.placedBombVisuals.clear();
+        this.localIsAlive = true;
 
         [
             this.hudTopPanel,
@@ -1237,7 +1363,7 @@ export class Game extends Scene
             fontSize: '17px',
             fontWeight: '700',
             letterSpacing: '1.4px',
-            color: '#f8eacd',
+            color: '#1a1919',
             marginBottom: '8px'
         });
 
@@ -1498,12 +1624,33 @@ export class Game extends Scene
             backdropFilter: 'blur(1.5px)'
         });
 
+        const respawnCountdown = document.createElement('div');
+        Object.assign(respawnCountdown.style, {
+            position: 'absolute',
+            left: '50%',
+            top: '50%',
+            transform: 'translate(-50%, -50%)',
+            display: 'none',
+            padding: '12px 18px',
+            borderRadius: '10px',
+            border: '1px solid rgba(255, 238, 196, 0.28)',
+            background: 'rgba(28, 19, 12, 0.78)',
+            fontFamily: 'Cinzel, Georgia, serif',
+            fontSize: '38px',
+            fontWeight: '700',
+            letterSpacing: '1.2px',
+            color: '#ffe6b2',
+            textShadow: '0 2px 0 rgba(0, 0, 0, 0.8)',
+            boxShadow: '0 12px 28px rgba(0, 0, 0, 0.38)'
+        });
+
         [
             leaderboardCard,
             healthCard,
             roomCard,
             weaponCard,
-            controlsHint
+            controlsHint,
+            respawnCountdown
         ].forEach((element) => root.appendChild(element));
 
         parent.appendChild(root);
@@ -1522,7 +1669,8 @@ export class Game extends Scene
             weaponLabel,
             weaponIcon,
             copyButton,
-            copyFeedback
+            copyFeedback,
+            respawnCountdown
         };
 
         this.applyHudSpritePanels();
@@ -1669,7 +1817,8 @@ export class Game extends Scene
                 this.applyHudSpritePanels();
                 const session = this.multiplayerSession;
                 const me = session?.room.players.find((player) => player.id === session.playerId);
-                this.applyLocalHealth(me?.hp ?? 100);
+                this.applyLocalHealth(me ? (me.isAlive ? me.hp : 0) : 100);
+                this.updateRespawnCountdown(me ?? null);
                 this.updateHudWeaponIcon(this.hudWeaponType);
             };
         }
@@ -1787,6 +1936,7 @@ export class Game extends Scene
         if (!me)
         {
             this.applyLocalHealth(100);
+            this.updateRespawnCountdown(null);
             this.localWeaponText?.setText('None');
             this.localWeaponIcon?.setFrame('slot_small_question');
             if (this.hudDom)
@@ -1797,7 +1947,8 @@ export class Game extends Scene
             return;
         }
 
-        this.applyLocalHealth(me.hp);
+        this.applyLocalHealth(me.isAlive ? me.hp : 0);
+        this.updateRespawnCountdown(me);
         this.applyLocalWeapon(me);
     }
 
@@ -1900,6 +2051,17 @@ export class Game extends Scene
 
     private getWeaponStatusLabel (player: PlayerState)
     {
+        if (!player.isAlive)
+        {
+            if (player.respawnAt)
+            {
+                const secondsLeft = Math.max(0, Math.ceil((player.respawnAt - Date.now()) / 1000));
+                return `RESPAWN ${secondsLeft}s`;
+            }
+
+            return 'Respawning';
+        }
+
         if (!player.activeWeaponType || !player.activeWeaponExpiresAt)
         {
             return 'None';
@@ -1936,6 +2098,11 @@ export class Game extends Scene
 
     private hasActiveWeapon (player: PlayerState)
     {
+        if (!player.isAlive)
+        {
+            return false;
+        }
+
         if (!player.activeWeaponType)
         {
             return false;

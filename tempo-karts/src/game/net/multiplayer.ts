@@ -15,6 +15,8 @@ export type PlayerState = {
     velocity: Vec2;
     rotation: number;
     hp: number;
+    isAlive: boolean;
+    respawnAt: number | null;
     kills: number;
     deaths: number;
     activeWeaponType: WeaponType | null;
@@ -63,6 +65,8 @@ export type PositionPayload = {
     velocity?: Vec2;
     rotation?: number;
     hp?: number;
+    isAlive?: boolean;
+    respawnAt?: number | null;
     ts?: number;
 };
 

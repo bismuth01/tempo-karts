@@ -142,7 +142,6 @@ const positionSchema = z.object({
   position: z.object({ x: z.number(), y: z.number() }),
   velocity: z.object({ x: z.number(), y: z.number() }).optional(),
   rotation: z.number().optional(),
-  hp: z.number().int().min(0).max(100).optional(),
   ts: z.number().optional()
 });
 
@@ -296,12 +295,11 @@ io.on('connection', (socket) => {
       return;
     }
 
-    const { roomCode, playerId, position, velocity, rotation, hp, ts } = parsed.data;
+    const { roomCode, playerId, position, velocity, rotation, ts } = parsed.data;
     const updated = roomManager.updatePosition(roomCode, playerId, {
       position,
       velocity,
-      rotation,
-      hp
+      rotation
     });
 
     if (!updated) {
@@ -314,7 +312,6 @@ io.on('connection', (socket) => {
       position,
       velocity,
       rotation,
-      hp,
       ts: ts ?? Date.now()
     });
 
