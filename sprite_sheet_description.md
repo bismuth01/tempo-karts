@@ -3,6 +3,7 @@
 ## Sources
 - Main environment/UI sheet: `tempo-karts/public/assets/sprite-sheet.png` (`1024 x 1536`)
 - Kart-only sheet: `tempo-karts/public/assets/kart-sheet.png` (`1536 x 1024`)
+- HUD-only sheet: `tempo-karts/public/assets/hud-sheet.png` (`1536 x 1024`)
 - Coordinate system: top-left origin
 - Format used below: `asset_name -> x, y, w, h`
 
@@ -17,6 +18,25 @@
 - `kart_blue_base_left` -> `647, 390, 284, 232`
 - `kart_blue_base_up_left` -> `946, 377, 259, 238`
 - `kart_blue_base_up` -> `1247, 372, 211, 240`
+
+## HUD Sheet (New, Active)
+- `hud_panel_wood_square` -> `128, 32, 257, 240`
+- `hud_panel_stone_square` -> `415, 34, 250, 236`
+- `hud_panel_parchment_large` -> `687, 33, 448, 168`
+- `hud_panel_wood_strip` -> `128, 304, 344, 73`
+- `hud_panel_stone_strip` -> `509, 304, 340, 73`
+- `hud_bar_bg_stone` -> `808, 595, 289, 61`
+- `hud_bar_hp_high` -> `128, 678, 344, 50`
+- `hud_bar_hp_mid` -> `488, 678, 297, 50`
+- `hud_bar_hp_low` -> `808, 677, 294, 51`
+- `hud_button_small_yellow` -> `552, 760, 144, 56`
+- `hud_icon_none` -> `128, 847, 111, 97`
+- `hud_icon_rocket` -> `248, 848, 106, 96`
+- `hud_icon_bomb` -> `360, 848, 108, 96`
+- `hud_icon_bullet` -> `584, 848, 106, 96`
+- `hud_icon_crate` -> `698, 848, 106, 96`
+- `hud_icon_question` -> `813, 847, 107, 97`
+- `hud_icon_trophy_skull_heart_strip` -> `944, 860, 171, 82`
 
 ## 8 Direction Runtime Mapping (From 5 Base Sprites)
 - Index order used in code: `0=E, 1=SE, 2=S, 3=SW, 4=W, 5=NW, 6=N, 7=NE`

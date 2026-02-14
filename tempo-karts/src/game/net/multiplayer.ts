@@ -5,6 +5,8 @@ export type Vec2 = {
     y: number;
 };
 
+export type WeaponType = 'rocket' | 'bomb' | 'bullet';
+
 export type PlayerState = {
     id: string;
     name: string;
@@ -15,6 +17,18 @@ export type PlayerState = {
     hp: number;
     kills: number;
     deaths: number;
+    activeWeaponType: WeaponType | null;
+    activeWeaponGrantedAt: number | null;
+    activeWeaponExpiresAt: number | null;
+    updatedAt: number;
+};
+
+export type CrateSlotState = {
+    id: string;
+    position: Vec2;
+    isAvailable: boolean;
+    weaponType: WeaponType;
+    respawnAt: number | null;
     updatedAt: number;
 };
 
@@ -24,6 +38,7 @@ export type RoomState = {
     maxPlayers: number;
     status: 'lobby' | 'in-progress' | 'finished';
     players: PlayerState[];
+    crateSlots: CrateSlotState[];
     spectators: number;
     lastUpdatedAt: number;
 };
@@ -51,6 +66,50 @@ export type PositionPayload = {
     ts?: number;
 };
 
+export type AttackPayload = {
+    roomCode: string;
+    playerId: string;
+    weaponType: WeaponType | 'unknown';
+    position: Vec2;
+    direction: Vec2;
+    payload?: Record<string, unknown>;
+    ts?: number;
+};
+
+export type ItemPayload = {
+    roomCode: string;
+    playerId: string;
+    kind: 'pickup' | 'use';
+    itemType: string;
+    slotId?: string;
+    targetId?: string;
+    payload?: Record<string, unknown>;
+    ts?: number;
+};
+
+export type ItemEvent = {
+    id: string;
+    roomCode: string;
+    playerId: string;
+    kind: 'pickup' | 'use';
+    itemType: string;
+    slotId?: string;
+    targetId?: string;
+    createdAt: number;
+    payload?: Record<string, unknown>;
+};
+
+export type AttackEvent = {
+    id: string;
+    roomCode: string;
+    playerId: string;
+    weaponType: WeaponType | 'unknown';
+    position: Vec2;
+    direction: Vec2;
+    createdAt: number;
+    payload?: Record<string, unknown>;
+};
+
 export type AckError = {
     ok: false;
     error: string;
@@ -76,6 +135,8 @@ export interface ClientToServerEvents {
     'room:join': (payload: JoinPayload, ack?: (response: JoinAckResponse) => void) => void;
     'room:leave': (payload: LeavePayload, ack?: (response: LeaveAckResponse) => void) => void;
     'player:position': (payload: PositionPayload) => void;
+    'player:attack': (payload: AttackPayload) => void;
+    'player:item': (payload: ItemPayload) => void;
 }
 
 export interface ServerToClientEvents {
@@ -83,6 +144,8 @@ export interface ServerToClientEvents {
     'room:player_joined': (payload: { roomCode: string; player?: PlayerState; playerId?: string }) => void;
     'room:player_left': (payload: { roomCode: string; playerId: string }) => void;
     'room:position': (payload: PositionPayload) => void;
+    'room:attack': (payload: AttackEvent & { ts: number }) => void;
+    'room:item': (payload: ItemEvent & { ts: number }) => void;
     'room:state': (payload: { room: RoomState; serverTime: number; tickRate: number }) => void;
 }
 

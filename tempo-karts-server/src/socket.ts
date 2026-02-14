@@ -33,6 +33,7 @@ export type ItemPayload = {
   playerId: string;
   kind: ItemEvent['kind'];
   itemType: string;
+  slotId?: string;
   targetId?: string;
   payload?: Record<string, unknown>;
   ts?: number;

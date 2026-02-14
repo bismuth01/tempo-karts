@@ -5,6 +5,8 @@ export type Vec2 = {
   y: number;
 };
 
+export type WeaponType = 'rocket' | 'bomb' | 'bullet';
+
 export type PlayerState = {
   id: string;
   name: string;
@@ -16,6 +18,18 @@ export type PlayerState = {
   hp: number;
   kills: number;
   deaths: number;
+  activeWeaponType: WeaponType | null;
+  activeWeaponGrantedAt: number | null;
+  activeWeaponExpiresAt: number | null;
+  updatedAt: number;
+};
+
+export type CrateSlotState = {
+  id: string;
+  position: Vec2;
+  isAvailable: boolean;
+  weaponType: WeaponType;
+  respawnAt: number | null;
   updatedAt: number;
 };
 
@@ -23,7 +37,7 @@ export type AttackEvent = {
   id: string;
   roomCode: string;
   playerId: string;
-  weaponType: 'rocket' | 'bomb' | 'bullet' | 'unknown';
+  weaponType: WeaponType | 'unknown';
   position: Vec2;
   direction: Vec2;
   createdAt: number;
@@ -36,6 +50,7 @@ export type ItemEvent = {
   playerId: string;
   kind: 'pickup' | 'use';
   itemType: string;
+  slotId?: string;
   targetId?: string;
   createdAt: number;
   payload?: Record<string, unknown>;
@@ -47,6 +62,7 @@ export type RoomState = {
   maxPlayers: number;
   status: 'lobby' | 'in-progress' | 'finished';
   players: PlayerState[];
+  crateSlots: CrateSlotState[];
   spectators: number;
   lastUpdatedAt: number;
 };

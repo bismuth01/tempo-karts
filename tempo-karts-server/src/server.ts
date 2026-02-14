@@ -161,6 +161,7 @@ const itemSchema = z.object({
   playerId: z.string().min(1),
   kind: z.enum(['pickup', 'use']),
   itemType: z.string().min(1),
+  slotId: z.string().optional(),
   targetId: z.string().optional(),
   payload: z.record(z.unknown()).optional(),
   ts: z.number().optional()
@@ -340,15 +341,34 @@ io.on('connection', (socket) => {
     }
 
     const { roomCode, playerId, weaponType, position, direction, payload, ts } = parsed.data;
-    const event = roomManager.createAttackEvent(roomCode, playerId, weaponType, position, direction, payload);
-
-    if (!event) {
+    const used = roomManager.useWeapon(roomCode, playerId, weaponType, position, direction, payload);
+    if ('error' in used) {
+      logServer('weapon:use_rejected', {
+        roomCode: roomCode.toUpperCase(),
+        playerId,
+        weaponType,
+        reason: used.error
+      });
       return;
     }
 
-    io.to(event.roomCode).emit('room:attack', {
-      ...event,
+    io.to(used.itemEvent.roomCode).emit('room:item', {
+      ...used.itemEvent,
       ts: ts ?? Date.now()
+    });
+
+    used.attackEvents.forEach((event) => {
+      io.to(event.roomCode).emit('room:attack', {
+        ...event,
+        ts: event.createdAt
+      });
+    });
+
+    logServer('weapon:use', {
+      roomCode: used.itemEvent.roomCode,
+      playerId,
+      weaponType: used.weaponType,
+      attackEvents: used.attackEvents.length
     });
   });
 
@@ -358,8 +378,35 @@ io.on('connection', (socket) => {
       return;
     }
 
-    const { roomCode, playerId, kind, itemType, targetId, payload, ts } = parsed.data;
-    const event = roomManager.createItemEvent(roomCode, playerId, kind, itemType, targetId, payload);
+    const { roomCode, playerId, kind, itemType, slotId, targetId, payload, ts } = parsed.data;
+
+    if (kind === 'pickup') {
+      if (!slotId) {
+        return;
+      }
+
+      const picked = roomManager.pickupCrate(roomCode, playerId, slotId, payload);
+      if ('error' in picked) {
+        return;
+      }
+
+      io.to(picked.event.roomCode).emit('room:item', {
+        ...picked.event,
+        ts: ts ?? Date.now()
+      });
+
+      logServer('item:pickup', {
+        roomCode: picked.event.roomCode,
+        playerId,
+        slotId,
+        weaponType: picked.event.itemType,
+        weaponExpiresAt: picked.player.activeWeaponExpiresAt,
+        crateRespawnAt: picked.slot.respawnAt
+      });
+      return;
+    }
+
+    const event = roomManager.createItemEvent(roomCode, playerId, kind, itemType, targetId, payload, slotId);
 
     if (!event) {
       return;
@@ -391,11 +438,21 @@ io.on('connection', (socket) => {
 });
 
 setInterval(() => {
+  const now = Date.now();
+  const tickResult = roomManager.tick(now, true);
+
+  tickResult.attackEvents.forEach((event) => {
+    io.to(event.roomCode).emit('room:attack', {
+      ...event,
+      ts: event.createdAt
+    });
+  });
+
   const rooms = roomManager.listRooms();
   for (const room of rooms) {
     io.to(room.code).emit('room:state', {
       room,
-      serverTime: Date.now(),
+      serverTime: now,
       tickRate: 20
     });
   }
