@@ -1,7 +1,11 @@
 import { PrivyProvider, User, usePrivy } from '@privy-io/react-auth';
-import { useEffect, useMemo, useRef } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { EventBus } from './game/EventBus';
 import { IRefPhaserGame, PhaserGame } from './PhaserGame';
+import { useChainActions } from './chain/useChainActions';
+import type { MultiplayerSession } from './game/net/multiplayer';
+import { PredictionMarketPanel } from './components/PredictionMarketPanel';
+import type { Address } from 'viem';
 
 type PrivyStatusPayload = {
     ready: boolean;
@@ -44,6 +48,9 @@ function PrivyEnabledGameShell ()
 {
     const phaserRef = useRef<IRefPhaserGame | null>(null);
     const { ready, authenticated, user, login, logout } = usePrivy();
+    const chainActions = useChainActions();
+
+    const [session, setSession] = useState<MultiplayerSession | null>(null);
 
     const walletAddress = useMemo(() => user?.wallet?.address ?? null, [user]);
     const playerName = useMemo(() => resolvePlayerName(user), [user]);
@@ -90,9 +97,65 @@ function PrivyEnabledGameShell ()
         };
     }, [authenticated, login, logout, ready, status]);
 
+    // Bridge chain actions: Phaser emits requests, React executes and emits results
+    useEffect(() => {
+        const handleApproveAndRegister = async (payload: {
+            stakeTokenAddress: string;
+            gameManagerAddress: string;
+            stakeAmount: string;
+        }) => {
+            try {
+                const result = await chainActions.approveAndRegister(
+                    payload.stakeTokenAddress as Address,
+                    payload.gameManagerAddress as Address,
+                    BigInt(payload.stakeAmount),
+                );
+                if (result.success) {
+                    EventBus.emit('chain:result-success', { txHash: result.txHash });
+                } else {
+                    EventBus.emit('chain:result-error', { error: result.error });
+                }
+            } catch (err) {
+                EventBus.emit('chain:result-error', {
+                    error: err instanceof Error ? err.message : 'Chain action failed',
+                });
+            }
+        };
+
+        EventBus.on('chain:approve-and-register', handleApproveAndRegister);
+
+        return () => {
+            EventBus.removeListener('chain:approve-and-register', handleApproveAndRegister);
+        };
+    }, [chainActions]);
+
+    // Track game session for showing prediction market overlay
+    useEffect(() => {
+        const handleSessionStarted = (s: MultiplayerSession) => {
+            setSession(s);
+        };
+
+        const handleSessionEnded = () => {
+            setSession(null);
+        };
+
+        EventBus.on('game-session-started', handleSessionStarted);
+        EventBus.on('game-session-ended', handleSessionEnded);
+
+        return () => {
+            EventBus.removeListener('game-session-started', handleSessionStarted);
+            EventBus.removeListener('game-session-ended', handleSessionEnded);
+        };
+    }, []);
+
+    const isSpectator = session?.role === 'spectator';
+
     return (
         <div id="app">
             <PhaserGame ref={phaserRef} />
+            {isSpectator && session && (
+                <PredictionMarketPanel session={session} />
+            )}
         </div>
     );
 }

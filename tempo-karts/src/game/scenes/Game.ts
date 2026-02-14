@@ -1,6 +1,6 @@
 import { EventBus } from '../EventBus';
 import { Scene } from 'phaser';
-import type { MultiplayerSession, PlayerState, PositionPayload, RoomState } from '../net/multiplayer';
+import type { MultiplayerSession, PlayerState, PositionPayload, RoomState, KillEvent } from '../net/multiplayer';
 import { applyDirectionPose, getDirectionPoseIndex } from '../kartDirection';
 
 export class Game extends Scene
@@ -39,8 +39,13 @@ export class Game extends Scene
     private localScoreTitleText?: Phaser.GameObjects.Text;
     private localScoreText?: Phaser.GameObjects.Text;
     private controlsHintText?: Phaser.GameObjects.Text;
+    private spectatorBannerText?: Phaser.GameObjects.Text;
+    private timerText?: Phaser.GameObjects.Text;
+    private killFeedTexts: Phaser.GameObjects.Text[] = [];
     private escapeKey?: Phaser.Input.Keyboard.Key;
     private isExiting = false;
+    private isSpectator = false;
+    private spectatorCamTarget?: Phaser.GameObjects.Rectangle;
 
     constructor ()
     {
@@ -52,19 +57,29 @@ export class Game extends Scene
         this.multiplayerTornDown = false;
         this.isExiting = false;
 
+        // Determine if spectator
+        const session = this.registry.get('multiplayer:session') as MultiplayerSession | undefined;
+        this.isSpectator = session?.role === 'spectator';
+
         this.physics.world.setBounds(0, 0, this.worldWidth, this.worldHeight);
         this.cameras.main.setBounds(0, 0, this.worldWidth, this.worldHeight);
 
         this.buildGround();
         this.buildArenaWalls();
         this.buildCosmetics();
-        this.createPlayer();
-        this.setupInput();
-        this.setupCamera();
+
+        if (!this.isSpectator) {
+            this.createPlayer();
+            this.setupInput();
+            this.setupCamera();
+            this.physics.add.collider(this.player, this.wallGroup);
+        } else {
+            this.setupSpectatorCamera();
+        }
+
         this.createHud();
         this.setupMultiplayer();
 
-        this.physics.add.collider(this.player, this.wallGroup);
         this.events.once('shutdown', this.onSceneShutdown);
 
         EventBus.emit('current-scene-ready', this);
@@ -75,6 +90,12 @@ export class Game extends Scene
         if (this.escapeKey && Phaser.Input.Keyboard.JustDown(this.escapeKey))
         {
             this.exitToMainMenu();
+            return;
+        }
+
+        // Spectators don't have a player to move
+        if (this.isSpectator) {
+            this.updateSpectatorCamera();
             return;
         }
 
@@ -118,6 +139,7 @@ export class Game extends Scene
 
         this.isExiting = true;
         this.teardownMultiplayer();
+        EventBus.emit('game-session-ended');
         this.scene.start('MainMenu');
     }
 
@@ -125,24 +147,30 @@ export class Game extends Scene
     {
         const session = this.registry.get('multiplayer:session') as MultiplayerSession | undefined;
 
-        if (!session?.socket || !session.roomCode || !session.playerId)
+        if (!session?.socket || !session.roomCode)
         {
             return;
         }
 
         this.multiplayerSession = session;
-        const localSnapshot = session.room.players.find((player) => player.id === session.playerId);
-        if (localSnapshot)
-        {
-            this.player.setPosition(localSnapshot.position.x, localSnapshot.position.y);
-            this.applyDirectionToSprite(this.player, localSnapshot.velocity.x, localSnapshot.velocity.y);
+
+        if (!this.isSpectator) {
+            const localSnapshot = session.room.players.find((player) => player.id === session.playerId);
+            if (localSnapshot && this.player)
+            {
+                this.player.setPosition(localSnapshot.position.x, localSnapshot.position.y);
+                this.applyDirectionToSprite(this.player, localSnapshot.velocity.x, localSnapshot.velocity.y);
+            }
         }
 
         this.bindMultiplayerEvents();
         this.hydrateRemotePlayersFromRoom(session.room);
         this.setRoomConnectionStatus(session.roomCode, true);
         this.refreshHudFromRoom(session.room);
-        this.sendLocalPosition(this.time.now, true);
+
+        if (!this.isSpectator) {
+            this.sendLocalPosition(this.time.now, true);
+        }
     }
 
     private bindMultiplayerEvents ()
@@ -158,6 +186,8 @@ export class Game extends Scene
         socket.on('room:state', this.handleRoomState);
         socket.on('room:player_joined', this.handlePlayerJoined);
         socket.on('room:player_left', this.handlePlayerLeft);
+        socket.on('room:kill', this.handleKillEvent);
+        socket.on('room:game_ended', this.handleGameEnded);
         socket.on('disconnect', this.handleSocketDisconnect);
     }
 
@@ -174,6 +204,8 @@ export class Game extends Scene
         socket.off('room:state', this.handleRoomState);
         socket.off('room:player_joined', this.handlePlayerJoined);
         socket.off('room:player_left', this.handlePlayerLeft);
+        socket.off('room:kill', this.handleKillEvent);
+        socket.off('room:game_ended', this.handleGameEnded);
         socket.off('disconnect', this.handleSocketDisconnect);
     }
 
@@ -260,7 +292,8 @@ export class Game extends Scene
         const remoteIds = new Set<string>();
 
         room.players.forEach((player) => {
-            if (player.id === session.playerId)
+            // Spectators see all players as remote; regular players skip themselves
+            if (!this.isSpectator && player.id === session.playerId)
             {
                 return;
             }
@@ -579,13 +612,27 @@ export class Game extends Scene
             strokeThickness: 4
         }).setOrigin(0, 0.5).setDepth(120).setScrollFactor(0);
 
-        this.controlsHintText = this.add.text(width / 2, height - 22, 'WASD / Arrow Keys to drive  •  ESC to return menu', {
+        this.controlsHintText = this.add.text(width / 2, height - 22,
+            this.isSpectator
+                ? 'SPECTATOR MODE  \u2022  ESC to return menu'
+                : 'WASD / Arrow Keys to drive  \u2022  ESC to return menu', {
             fontFamily: 'Cinzel',
             fontSize: '19px',
             color: '#f9e6bd',
             stroke: '#2a170d',
             strokeThickness: 4
         }).setOrigin(0.5, 0.5).setDepth(120).setScrollFactor(0);
+
+        if (this.isSpectator) {
+            this.spectatorBannerText = this.add.text(width / 2, 126, '\uD83D\uDCFA SPECTATING', {
+                fontFamily: 'Cinzel',
+                fontStyle: 'bold',
+                fontSize: '28px',
+                color: '#66bb6a',
+                stroke: '#2a170d',
+                strokeThickness: 5
+            }).setOrigin(0.5).setDepth(125).setScrollFactor(0);
+        }
 
         this.leaderboardTitleText = this.add.text(22, 12, 'LEADERBOARD', {
             fontFamily: 'Cinzel',
@@ -693,6 +740,102 @@ export class Game extends Scene
         this.cameras.main.startFollow(this.player, true, 0.1, 0.1);
         this.cameras.main.setZoom(1.18);
         this.cameras.main.setDeadzone(220, 130);
+    }
+
+    private setupSpectatorCamera ()
+    {
+        // Create an invisible target for the spectator camera at arena center
+        const cx = this.arena.x + this.arena.width / 2;
+        const cy = this.arena.y + this.arena.height / 2;
+        this.spectatorCamTarget = this.add.rectangle(cx, cy, 1, 1, 0x000000, 0).setDepth(0);
+        this.cameras.main.startFollow(this.spectatorCamTarget, true, 0.05, 0.05);
+        this.cameras.main.setZoom(0.82);
+
+        // Setup minimal input for spectator (just escape)
+        this.escapeKey = this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.ESC);
+    }
+
+    private updateSpectatorCamera ()
+    {
+        // Auto-follow the player with the most recent action
+        if (!this.spectatorCamTarget) return;
+
+        const session = this.multiplayerSession;
+        if (!session || session.room.players.length === 0) return;
+
+        // Follow the player with the most kills (most interesting)
+        const topPlayer = [...session.room.players].sort((a, b) => b.kills - a.kills)[0];
+        const remote = this.remotePlayers.get(topPlayer.id);
+        if (remote) {
+            this.spectatorCamTarget.setPosition(
+                Phaser.Math.Linear(this.spectatorCamTarget.x, remote.x, 0.03),
+                Phaser.Math.Linear(this.spectatorCamTarget.y, remote.y, 0.03)
+            );
+        }
+    }
+
+    private handleKillEvent = (payload: KillEvent) =>
+    {
+        const session = this.multiplayerSession;
+        if (!session || payload.roomCode !== session.roomCode) return;
+
+        // Show kill in kill feed
+        this.addKillFeedEntry(`${payload.attackerName} killed ${payload.victimName}`);
+
+        // Camera shake effect for spectators on kill
+        if (this.isSpectator) {
+            this.cameras.main.shake(200, 0.005);
+        }
+
+        // Forward kill to React for prediction market updates
+        EventBus.emit('game:kill-event', payload);
+    };
+
+    private handleGameEnded = (payload: { room: RoomState; winner?: string; mostDeaths?: string }) =>
+    {
+        const session = this.multiplayerSession;
+        if (!session) return;
+
+        session.room = payload.room;
+        EventBus.emit('game:ended', payload);
+
+        // Show game over overlay
+        this.time.delayedCall(2000, () => {
+            this.teardownMultiplayer();
+            this.scene.start('GameOver');
+        });
+    };
+
+    private addKillFeedEntry (text: string)
+    {
+        const { width } = this.scale;
+
+        const entry = this.add.text(width - 22, 80, text, {
+            fontFamily: 'Cinzel',
+            fontSize: '18px',
+            color: '#ff6b6b',
+            stroke: '#2a170d',
+            strokeThickness: 3
+        }).setOrigin(1, 0).setDepth(130).setScrollFactor(0).setAlpha(1);
+
+        // Push existing entries down
+        this.killFeedTexts.forEach((t, i) => {
+            t.y += 24;
+            if (i > 3) { t.destroy(); }
+        });
+        this.killFeedTexts = [entry, ...this.killFeedTexts.slice(0, 4)];
+
+        // Fade out after 4 seconds
+        this.tweens.add({
+            targets: entry,
+            alpha: 0,
+            delay: 4000,
+            duration: 1000,
+            onComplete: () => {
+                entry.destroy();
+                this.killFeedTexts = this.killFeedTexts.filter(t => t !== entry);
+            }
+        });
     }
 
     private applyDirectionToSprite (sprite: Phaser.GameObjects.Sprite, dx: number, dy: number)

@@ -10,7 +10,7 @@ import type {
 } from '../net/multiplayer';
 import { applyDirectionPose, KART_SPIN_POSE_ORDER } from '../kartDirection';
 
-type MenuMode = 'create' | 'join';
+type MenuMode = 'create' | 'join' | 'spectate' | 'browse';
 
 type PrivyStatusPayload = {
     ready: boolean;
@@ -320,15 +320,29 @@ export class MainMenu extends Scene {
 
     private createMenuButtons () {
         const { width, height } = this.scale;
-        const firstButtonY = height * 0.79;
+        const btnW = 370;
+        const btnH = 80;
+        const gap = 18;
+        const cols = 2;
+        const startY = height * 0.76;
+        const leftX = width / 2 - (btnW + gap) / 2;
+        const rightX = width / 2 + (btnW + gap) / 2;
 
-        this.createMenuButton(width / 2, firstButtonY, 'CREATE GAME', 'slot_med_wood', () => {
+        this.createMenuButton(leftX, startY, 'CREATE GAME', 'slot_med_wood', () => {
             this.openPopup('create');
-        });
+        }, btnW, btnH);
 
-        this.createMenuButton(width / 2, firstButtonY + 104, 'JOIN GAME', 'slot_med_stone', () => {
+        this.createMenuButton(rightX, startY, 'JOIN GAME', 'slot_med_stone', () => {
             this.openPopup('join');
-        });
+        }, btnW, btnH);
+
+        this.createMenuButton(leftX, startY + btnH + gap, 'SPECTATE', 'slot_med_stone', () => {
+            this.openPopup('spectate');
+        }, btnW, btnH);
+
+        this.createMenuButton(rightX, startY + btnH + gap, 'LIVE GAMES', 'slot_med_wood', () => {
+            this.openPopup('browse');
+        }, btnW, btnH);
     }
 
     private createMenuButton (
@@ -336,11 +350,13 @@ export class MainMenu extends Scene {
         y: number,
         label: string,
         frame: string,
-        onClick: () => void
+        onClick: () => void,
+        customWidth?: number,
+        customHeight?: number
     ) {
         const container = this.add.container(x, y).setDepth(25);
-        const buttonWidth = 408;
-        const buttonHeight = 92;
+        const buttonWidth = customWidth ?? 408;
+        const buttonHeight = customHeight ?? 92;
 
         const shadow = this.add.rectangle(0, 8, buttonWidth - 22, buttonHeight - 18, 0x0a0502, 0.42)
             .setDepth(-1);
@@ -420,95 +436,161 @@ export class MainMenu extends Scene {
     }
 
     private buildPopupContainer (mode: MenuMode) {
+        if (mode === 'browse') {
+            return this.buildBrowsePopup();
+        }
+
         const { width, height } = this.scale;
 
         const panelWidth = 900;
-        const panelHeight = 520;
+        const panelHeight = 560;
         const container = this.add.container(width / 2, height / 2);
 
         const center = this.add.tileSprite(0, 0, panelWidth, panelHeight, 'sprite-sheet', 'tile_dirt');
-
         const topBorder = this.add.tileSprite(0, -panelHeight / 2 + 28, panelWidth, 56, 'sprite-sheet', 'tile_stone_wall');
-
         const bottomBorder = this.add.tileSprite(0, panelHeight / 2 - 28, panelWidth, 56, 'sprite-sheet', 'tile_stone_wall');
-
         const leftBorder = this.add.tileSprite(-panelWidth / 2 + 28, 0, 56, panelHeight - 56, 'sprite-sheet', 'slot_small_stone');
-
         const rightBorder = this.add.tileSprite(panelWidth / 2 - 28, 0, 56, panelHeight - 56, 'sprite-sheet', 'slot_small_stone');
 
-        const title = this.add.text(0, -panelHeight / 2 + 86, mode === 'create' ? 'CREATE GAME' : 'JOIN GAME', {
-            fontFamily: 'Cinzel',
-            fontStyle: 'bold',
-            fontSize: '64px',
-            color: '#fff0cd',
-            stroke: '#3c2415',
-            strokeThickness: 10
+        const titles: Record<string, string> = {
+            create: 'CREATE GAME',
+            join: 'JOIN GAME',
+            spectate: 'SPECTATE GAME',
+        };
+        const subtitles: Record<string, string> = {
+            create: 'Create a new room and stake to play',
+            join: 'Enter a room code to join as a player',
+            spectate: 'Enter a room code to watch and bet',
+        };
+        const fieldDefaults: Record<string, string> = {
+            create: 'Room: (will be generated)',
+            join: '',
+            spectate: '',
+        };
+
+        const title = this.add.text(0, -panelHeight / 2 + 86, titles[mode] ?? 'GAME', {
+            fontFamily: 'Cinzel', fontStyle: 'bold', fontSize: '58px',
+            color: '#fff0cd', stroke: '#3c2415', strokeThickness: 10
         }).setOrigin(0.5);
 
-        const subLabel = this.add.text(
-            0,
-            -40,
-            mode === 'create' ? 'Set room details and start a new match' : 'Enter room code to join an existing match',
-            {
-                fontFamily: 'Cinzel',
-                fontStyle: 'bold',
-                fontSize: '34px',
-                color: '#3d2314',
-                stroke: '#ffeec8',
-                strokeThickness: 3
-            }
-        ).setOrigin(0.5);
-
-        const field = this.add.tileSprite(0, 58, 640, 92, 'sprite-sheet', 'timer_board_large');
-
-        const fieldText = this.add.text(0, 58, mode === 'create' ? 'Room: (will be generated)' : 'Code:', {
-            fontFamily: 'Cinzel',
-            fontStyle: 'bold',
-            fontSize: '34px',
-            color: '#2d1a10',
-            stroke: '#ffeac3',
-            strokeThickness: 3
+        const subLabel = this.add.text(0, -40, subtitles[mode] ?? '', {
+            fontFamily: 'Cinzel', fontStyle: 'bold', fontSize: '30px',
+            color: '#3d2314', stroke: '#ffeec8', strokeThickness: 3
         }).setOrigin(0.5);
 
-        const infoText = this.add.text(0, 124, '', {
-            fontFamily: 'Cinzel',
-            fontStyle: 'bold',
-            fontSize: '22px',
-            color: '#3d2314',
-            stroke: '#ffeec8',
-            strokeThickness: 2
+        const field = this.add.tileSprite(0, 48, 640, 92, 'sprite-sheet', 'timer_board_large');
+        const fieldText = this.add.text(0, 48, fieldDefaults[mode] ?? '', {
+            fontFamily: 'Cinzel', fontStyle: 'bold', fontSize: '34px',
+            color: '#2d1a10', stroke: '#ffeac3', strokeThickness: 3
         }).setOrigin(0.5);
 
-        if (mode === 'join') {
-            this.createRoomCodeInput(width / 2, height / 2 + 58);
+        const infoText = this.add.text(0, 114, '', {
+            fontFamily: 'Cinzel', fontStyle: 'bold', fontSize: '22px',
+            color: '#3d2314', stroke: '#ffeec8', strokeThickness: 2
+        }).setOrigin(0.5);
+
+        if (mode === 'join' || mode === 'spectate') {
+            this.createRoomCodeInput(width / 2, height / 2 + 48);
             fieldText.setText('');
         }
 
-        const primaryLabel = mode === 'create' ? 'CREATE' : 'JOIN';
-        const primaryAction = this.createPopupButton(0, 188, primaryLabel, () => {
+        const primaryLabels: Record<string, string> = { create: 'CREATE & STAKE', join: 'STAKE & JOIN', spectate: 'WATCH' };
+        const primaryAction = this.createPopupButton(0, 188, primaryLabels[mode] ?? 'GO', () => {
             void this.handlePopupPrimaryAction(mode, fieldText, infoText);
         });
 
-        const closeAction = this.createPopupButton(0, 274, 'CANCEL', () => {
+        const closeAction = this.createPopupButton(0, 268, 'CANCEL', () => {
             this.closePopup();
         }, 'slot_med_stone');
 
         container.add([
-            center,
-            topBorder,
-            bottomBorder,
-            leftBorder,
-            rightBorder,
-            title,
-            subLabel,
-            field,
-            fieldText,
-            infoText,
-            primaryAction,
-            closeAction
+            center, topBorder, bottomBorder, leftBorder, rightBorder,
+            title, subLabel, field, fieldText, infoText,
+            primaryAction, closeAction
         ]);
 
         return container;
+    }
+
+    private buildBrowsePopup () {
+        const { width, height } = this.scale;
+        const panelWidth = 960;
+        const panelHeight = 600;
+        const container = this.add.container(width / 2, height / 2);
+
+        const center = this.add.tileSprite(0, 0, panelWidth, panelHeight, 'sprite-sheet', 'tile_dirt');
+        const topBorder = this.add.tileSprite(0, -panelHeight / 2 + 28, panelWidth, 56, 'sprite-sheet', 'tile_stone_wall');
+        const bottomBorder = this.add.tileSprite(0, panelHeight / 2 - 28, panelWidth, 56, 'sprite-sheet', 'tile_stone_wall');
+        const leftBorder = this.add.tileSprite(-panelWidth / 2 + 28, 0, 56, panelHeight - 56, 'sprite-sheet', 'slot_small_stone');
+        const rightBorder = this.add.tileSprite(panelWidth / 2 - 28, 0, 56, panelHeight - 56, 'sprite-sheet', 'slot_small_stone');
+
+        const title = this.add.text(0, -panelHeight / 2 + 86, 'LIVE GAMES', {
+            fontFamily: 'Cinzel', fontStyle: 'bold', fontSize: '58px',
+            color: '#fff0cd', stroke: '#3c2415', strokeThickness: 10
+        }).setOrigin(0.5);
+
+        const listText = this.add.text(0, 0, 'Loading games...', {
+            fontFamily: 'Cinzel', fontStyle: 'bold', fontSize: '26px',
+            color: '#3d2314', stroke: '#ffeec8', strokeThickness: 2,
+            align: 'center', lineSpacing: 8
+        }).setOrigin(0.5);
+
+        const closeAction = this.createPopupButton(0, panelHeight / 2 - 86, 'CLOSE', () => {
+            this.closePopup();
+        }, 'slot_med_stone');
+
+        container.add([
+            center, topBorder, bottomBorder, leftBorder, rightBorder,
+            title, listText, closeAction
+        ]);
+
+        // Fetch and display ongoing games
+        void this.fetchAndDisplayGames(listText, container);
+
+        return container;
+    }
+
+    private async fetchAndDisplayGames (listText: GameObjects.Text, container: GameObjects.Container) {
+        try {
+            const response = await fetch(`${this.serverBaseUrl}/api/rooms`);
+            if (!response.ok) throw new Error('Failed to fetch rooms');
+            const data = await response.json() as { rooms: RoomState[] };
+            const rooms = data.rooms ?? [];
+
+            if (rooms.length === 0) {
+                listText.setText('No active games right now.\nCreate one!');
+                return;
+            }
+
+            // Build game list with clickable entries
+            listText.setText('');
+            const startY = -100;
+            rooms.forEach((room, i) => {
+                const y = startY + i * 70;
+                const statusColor = room.status === 'in-progress' ? '#66bb6a' : '#f9e6bd';
+                const statusLabel = room.status === 'in-progress' ? 'LIVE' : room.status.toUpperCase();
+                const line = `${room.code}  •  ${room.players.length}/${room.maxPlayers} players  •  ${statusLabel}`;
+
+                const rowText = this.add.text(0, y, line, {
+                    fontFamily: 'Cinzel', fontStyle: 'bold', fontSize: '26px',
+                    color: statusColor, stroke: '#2a170d', strokeThickness: 3
+                }).setOrigin(0.5);
+
+                const rowHit = this.add.rectangle(0, y, 800, 56, 0xffffff, 0.001)
+                    .setInteractive({ useHandCursor: true });
+
+                rowHit.on('pointerover', () => rowText.setColor('#ffd700'));
+                rowHit.on('pointerout', () => rowText.setColor(statusColor));
+                rowHit.on('pointerup', () => {
+                    this.closePopup();
+                    void this.spectateRoomDirect(room.code);
+                });
+
+                container.add([rowText, rowHit]);
+            });
+        } catch {
+            listText.setText('Could not load games.\nCheck server connection.');
+        }
     }
 
     private async handlePopupPrimaryAction (
@@ -528,6 +610,11 @@ export class MainMenu extends Scene {
                 return;
             }
 
+            if (mode === 'spectate') {
+                await this.spectateRoomFlow(infoText);
+                return;
+            }
+
             await this.joinRoomFlow(infoText);
         } catch (error) {
             infoText.setText(this.getErrorMessage(error));
@@ -537,16 +624,18 @@ export class MainMenu extends Scene {
     }
 
     private async createRoomFlow (fieldText: GameObjects.Text, infoText: GameObjects.Text) {
+        if (!this.privyAuthenticated || !this.walletAddress) {
+            throw new Error('Connect your wallet first (top-right)');
+        }
+
         infoText.setText('Creating room...');
 
         const response = await fetch(`${this.serverBaseUrl}/api/rooms`, {
             method: 'POST',
-            headers: {
-                'Content-Type': 'application/json'
-            },
+            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 hostName: this.playerNameValueText.text || 'VillageRacer',
-                walletAddress: this.walletAddress ?? undefined,
+                walletAddress: this.walletAddress,
                 maxPlayers: 4
             })
         });
@@ -566,19 +655,37 @@ export class MainMenu extends Scene {
 
         fieldText.setText(`Room: ${roomCode}`);
 
+        // On-chain staking: approve + register
+        if (created.room.chain?.gameManagerAddress && created.room.chain?.stakeTokenAddress) {
+            infoText.setText('Approving TIP20 stake...');
+            EventBus.emit('chain:approve-and-register', {
+                stakeTokenAddress: created.room.chain.stakeTokenAddress,
+                gameManagerAddress: created.room.chain.gameManagerAddress,
+                stakeAmount: created.room.chain.stakeAmount ?? '1000000000000000000',
+            });
+
+            // Wait for chain result (emitted by React layer)
+            await this.waitForChainResult(infoText);
+        }
+
+        infoText.setText('Connecting to room...');
         const joined = await this.connectAndJoin({
             roomCode,
             role: 'player',
             playerName: this.playerNameValueText.text || 'VillageRacer',
-            walletAddress: this.walletAddress ?? undefined,
+            walletAddress: this.walletAddress,
             playerId: hostPlayerId
         });
 
         infoText.setText('Room ready! Starting game...');
-        this.promoteSessionAndStartGame(joined.socket, roomCode, joined.playerId, joined.room);
+        this.promoteSessionAndStartGame(joined.socket, roomCode, joined.playerId, joined.room, 'player');
     }
 
     private async joinRoomFlow (infoText: GameObjects.Text) {
+        if (!this.privyAuthenticated || !this.walletAddress) {
+            throw new Error('Connect your wallet first (top-right)');
+        }
+
         const rawRoomCode = this.roomCodeInput?.value?.trim().toUpperCase() ?? '';
         const roomCode = this.normalizeRoomCode(rawRoomCode);
 
@@ -590,17 +697,121 @@ export class MainMenu extends Scene {
             throw new Error('Room code format should be KART-XXXX or XXXX');
         }
 
+        // Fetch room info first to get chain addresses
+        infoText.setText('Checking room...');
+        const roomResp = await fetch(`${this.serverBaseUrl}/api/rooms/${roomCode}`);
+        if (!roomResp.ok) throw new Error('Room not found');
+        const roomData = await roomResp.json() as { room: RoomState };
+
+        // On-chain staking if chain data available
+        if (roomData.room.chain?.gameManagerAddress && roomData.room.chain?.stakeTokenAddress) {
+            infoText.setText('Approving TIP20 stake...');
+            EventBus.emit('chain:approve-and-register', {
+                stakeTokenAddress: roomData.room.chain.stakeTokenAddress,
+                gameManagerAddress: roomData.room.chain.gameManagerAddress,
+                stakeAmount: roomData.room.chain.stakeAmount ?? '1000000000000000000',
+            });
+            await this.waitForChainResult(infoText);
+        }
+
         infoText.setText('Joining room...');
 
         const joined = await this.connectAndJoin({
             roomCode,
             role: 'player',
             playerName: this.playerNameValueText.text || 'VillageRacer',
-            walletAddress: this.walletAddress ?? undefined
+            walletAddress: this.walletAddress
         });
 
         infoText.setText('Joined! Starting game...');
-        this.promoteSessionAndStartGame(joined.socket, roomCode, joined.playerId, joined.room);
+        this.promoteSessionAndStartGame(joined.socket, roomCode, joined.playerId, joined.room, 'player');
+    }
+
+    private async spectateRoomFlow (infoText: GameObjects.Text) {
+        const rawRoomCode = this.roomCodeInput?.value?.trim().toUpperCase() ?? '';
+        const roomCode = this.normalizeRoomCode(rawRoomCode);
+
+        if (!roomCode) {
+            throw new Error('Enter a room code first');
+        }
+
+        if (!roomCode.startsWith('KART-')) {
+            throw new Error('Room code format should be KART-XXXX or XXXX');
+        }
+
+        infoText.setText('Connecting as spectator...');
+
+        const socket = io(this.serverBaseUrl, {
+            transports: ['websocket', 'polling']
+        }) as GameSocket;
+        this.activeSocket = socket;
+        await this.waitForSocketConnect(socket);
+
+        const ack = await new Promise<JoinAckResponse>((resolve) => {
+            socket.emit('room:join', { roomCode, role: 'spectator' }, resolve);
+        });
+
+        if (!ack.ok) {
+            socket.disconnect();
+            this.activeSocket = undefined;
+            throw new Error(ack.error || 'Join failed');
+        }
+
+        infoText.setText('Spectating!');
+        this.promoteSessionAndStartGame(socket, roomCode, `spectator-${Date.now()}`, ack.room, 'spectator');
+    }
+
+    private async spectateRoomDirect (roomCode: string) {
+        try {
+            const socket = io(this.serverBaseUrl, {
+                transports: ['websocket', 'polling']
+            }) as GameSocket;
+            this.activeSocket = socket;
+            await this.waitForSocketConnect(socket);
+
+            const ack = await new Promise<JoinAckResponse>((resolve) => {
+                socket.emit('room:join', { roomCode, role: 'spectator' }, resolve);
+            });
+
+            if (!ack.ok) {
+                socket.disconnect();
+                this.activeSocket = undefined;
+                return;
+            }
+
+            this.promoteSessionAndStartGame(socket, roomCode, `spectator-${Date.now()}`, ack.room, 'spectator');
+        } catch {
+            // Silently fail
+        }
+    }
+
+    private waitForChainResult (infoText: GameObjects.Text): Promise<void> {
+        return new Promise<void>((resolve, reject) => {
+            const timeout = window.setTimeout(() => {
+                cleanup();
+                reject(new Error('Chain transaction timed out. Try again.'));
+            }, 60000);
+
+            const onSuccess = () => {
+                cleanup();
+                infoText.setText('On-chain registration complete!');
+                resolve();
+            };
+
+            const onError = (payload: { error: string }) => {
+                cleanup();
+                reject(new Error(payload.error || 'Chain transaction failed'));
+            };
+
+            const cleanup = () => {
+                window.clearTimeout(timeout);
+                EventBus.removeListener('chain:result-success', onSuccess);
+                EventBus.removeListener('chain:result-error', onError);
+            };
+
+            EventBus.on('chain:result-success', onSuccess);
+            EventBus.on('chain:result-error', onError);
+        });
     }
 
     private normalizeRoomCode (rawCode: string) {
@@ -630,12 +841,6 @@ export class MainMenu extends Scene {
             socket.disconnect();
             this.activeSocket = undefined;
             throw new Error(ack.error || 'Join failed');
-        }
-
-        if (ack.role !== 'player') {
-            socket.disconnect();
-            this.activeSocket = undefined;
-            throw new Error('Only player role is supported right now');
         }
 
         const playerId = ack.player?.id ?? ack.playerId;
@@ -678,16 +883,20 @@ export class MainMenu extends Scene {
         });
     }
 
-    private promoteSessionAndStartGame (socket: GameSocket, roomCode: string, playerId: string, room: RoomState) {
+    private promoteSessionAndStartGame (socket: GameSocket, roomCode: string, playerId: string, room: RoomState, role: 'player' | 'spectator' = 'player') {
         const session: MultiplayerSession = {
             socket,
             roomCode,
             playerId,
-            room
+            room,
+            role
         };
 
         this.registry.set('multiplayer:session', session);
         this.activeSocket = undefined;
+
+        // Notify React layer about session (for prediction market overlay)
+        EventBus.emit('game-session-started', session);
 
         this.closePopup();
         this.scene.start('Game');
