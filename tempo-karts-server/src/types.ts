@@ -41,6 +41,32 @@ export type ItemEvent = {
   payload?: Record<string, unknown>;
 };
 
+export type ChainRoomData = {
+  gameManagerAddress: string;
+  stakeTokenAddress: string;
+  stakeAmount: string;
+  itemRecorderAddress?: string;
+  killRecorderAddress?: string;
+  positionRecorderAddress?: string;
+  livePredictionMarketAddress?: string;
+  staticPredictionMarketAddress?: string;
+  players?: string[];
+};
+
+export type KillEvent = {
+  roomCode: string;
+  attackerId: string;
+  attackerName: string;
+  attackerWallet?: string;
+  victimId: string;
+  victimName: string;
+  victimWallet?: string;
+  weaponType: string;
+  healthDepleted: number;
+  killed: boolean;
+  timestamp: number;
+};
+
 export type RoomState = {
   code: string;
   hostPlayerId: string;
@@ -49,4 +75,7 @@ export type RoomState = {
   players: PlayerState[];
   spectators: number;
   lastUpdatedAt: number;
+  chain?: ChainRoomData;
+  gameStartedAt?: number;
+  gameDurationSeconds?: number;
 };

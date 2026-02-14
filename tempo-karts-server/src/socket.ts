@@ -1,4 +1,4 @@
-import type { AttackEvent, ItemEvent, PlayerState, RoomState, Vec2 } from './types.js';
+import type { AttackEvent, ItemEvent, KillEvent, PlayerState, RoomState, Vec2 } from './types.js';
 
 export type JoinPayload = {
   roomCode: string;
@@ -43,6 +43,15 @@ export type LeavePayload = {
   playerId?: string;
 };
 
+export type DamagePayload = {
+  roomCode: string;
+  attackerId: string;
+  victimId: string;
+  weaponType: string;
+  healthDepleted: number;
+  killed: boolean;
+};
+
 export type AckError = {
   ok: false;
   error: string;
@@ -65,6 +74,7 @@ export interface ClientToServerEvents {
   'player:position': (payload: PositionPayload) => void;
   'player:attack': (payload: AttackPayload) => void;
   'player:item': (payload: ItemPayload) => void;
+  'player:damage': (payload: DamagePayload) => void;
 }
 
 export interface ServerToClientEvents {
@@ -76,6 +86,8 @@ export interface ServerToClientEvents {
   'room:item': (payload: ItemEvent & { ts: number }) => void;
   'room:state': (payload: { room: RoomState; serverTime: number; tickRate: number }) => void;
   'room:game_started': (payload: { room: RoomState | null }) => void;
+  'room:kill': (payload: KillEvent) => void;
+  'room:game_ended': (payload: { roomCode: string; winner?: string; winnerName?: string; mostDeaths?: string }) => void;
 }
 
 export interface InterServerEvents {}

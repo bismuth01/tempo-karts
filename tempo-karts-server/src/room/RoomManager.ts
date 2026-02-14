@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { AttackEvent, ItemEvent, PlayerState, RoomState, Vec2 } from '../types.js';
+import type { AttackEvent, ChainRoomData, ItemEvent, PlayerState, RoomState, Vec2 } from '../types.js';
 
 type RoomRecord = {
   code: string;
@@ -9,6 +9,9 @@ type RoomRecord = {
   players: Map<string, PlayerState>;
   spectators: Set<string>; // socket ids
   lastUpdatedAt: number;
+  chain?: ChainRoomData;
+  gameStartedAt?: number;
+  gameDurationSeconds?: number;
 };
 
 const PLAYER_SPAWN: Vec2 = { x: 800, y: 600 };
@@ -130,6 +133,11 @@ export class RoomManager {
     for (const room of this.rooms.values()) {
       if (room.spectators.delete(socketId)) {
         room.lastUpdatedAt = Date.now();
+
+        if (room.players.size === 0 && room.spectators.size === 0) {
+          this.rooms.delete(room.code);
+        }
+
         return { roomCode: room.code, playerId: null as string | null };
       }
 
@@ -159,11 +167,21 @@ export class RoomManager {
     if (playerId && room.players.has(playerId)) {
       room.players.delete(playerId);
       room.lastUpdatedAt = Date.now();
+
+      if (room.players.size === 0 && room.spectators.size === 0) {
+        this.rooms.delete(room.code);
+      }
+
       return { ok: true, playerId };
     }
 
     if (room.spectators.delete(socketId)) {
       room.lastUpdatedAt = Date.now();
+
+      if (room.players.size === 0 && room.spectators.size === 0) {
+        this.rooms.delete(room.code);
+      }
+
       return { ok: true, playerId: null as string | null };
     }
 
@@ -204,8 +222,41 @@ export class RoomManager {
     }
 
     room.status = 'in-progress';
+    room.gameStartedAt = Date.now();
     room.lastUpdatedAt = Date.now();
     return this.toRoomState(room);
+  }
+
+  endGame(code: string) {
+    const room = this.rooms.get(code.toUpperCase());
+    if (!room) {
+      return null;
+    }
+
+    room.status = 'finished';
+    room.gameDurationSeconds = room.gameStartedAt
+      ? Math.round((Date.now() - room.gameStartedAt) / 1000)
+      : 0;
+    room.lastUpdatedAt = Date.now();
+    return this.toRoomState(room);
+  }
+
+  setChainData(code: string, chain: ChainRoomData) {
+    const room = this.rooms.get(code.toUpperCase());
+    if (!room) return false;
+    room.chain = chain;
+    room.lastUpdatedAt = Date.now();
+    return true;
+  }
+
+  getChainData(code: string): ChainRoomData | undefined {
+    return this.rooms.get(code.toUpperCase())?.chain;
+  }
+
+  getPlayersSnapshot(code: string): PlayerState[] {
+    const room = this.rooms.get(code.toUpperCase());
+    if (!room) return [];
+    return [...room.players.values()];
   }
 
   createAttackEvent(code: string, playerId: string, weaponType: AttackEvent['weaponType'], position: Vec2, direction: Vec2, payload?: Record<string, unknown>) {
@@ -256,7 +307,10 @@ export class RoomManager {
       status: room.status,
       players: [...room.players.values()],
       spectators: room.spectators.size,
-      lastUpdatedAt: room.lastUpdatedAt
+      lastUpdatedAt: room.lastUpdatedAt,
+      chain: room.chain,
+      gameStartedAt: room.gameStartedAt,
+      gameDurationSeconds: room.gameDurationSeconds,
     };
   }
 

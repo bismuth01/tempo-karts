@@ -5,6 +5,10 @@ import http from 'node:http';
 import { Server } from 'socket.io';
 import { z } from 'zod';
 import { RoomManager } from './room/RoomManager.js';
+import { ChainService, type GameChainState } from './chain/ChainService.js';
+import { RecorderService } from './chain/RecorderService.js';
+import { BACKEND_PRIVATE_KEY, STAKE_TOKEN_ADDRESS, DEFAULT_STAKE_AMOUNT, DEFAULT_PLAYER_CAP } from './chain/config.js';
+import type { KillEvent } from './types.js';
 import type {
   ClientToServerEvents,
   InterServerEvents,
@@ -46,6 +50,21 @@ const roomManager = new RoomManager();
 const positionLogEveryMs = 500;
 const lastPositionLogAt = new Map<string, number>();
 
+// Chain services — optional: only active when BACKEND_PRIVATE_KEY is set
+let chainService: ChainService | null = null;
+const recorderServices = new Map<string, RecorderService>(); // roomCode → RecorderService
+
+try {
+    if (BACKEND_PRIVATE_KEY) {
+        chainService = new ChainService();
+        console.log('[Server] ChainService initialized');
+    } else {
+        console.log('[Server] No BACKEND_PRIVATE_KEY — running without chain features');
+    }
+} catch (err) {
+    console.warn('[Server] ChainService init failed:', err);
+}
+
 const logServer = (event: string, details: Record<string, unknown>) => {
   console.log(`[${new Date().toISOString()}] [${event}]`, details);
 };
@@ -77,7 +96,7 @@ const createRoomSchema = z.object({
   maxPlayers: z.number().min(2).max(8).optional().default(4)
 });
 
-app.post('/api/rooms', (req, res) => {
+app.post('/api/rooms', async (req, res) => {
   const parsed = createRoomSchema.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({ error: parsed.error.flatten() });
@@ -93,14 +112,36 @@ app.post('/api/rooms', (req, res) => {
     walletAddress: walletAddress ?? null
   });
 
-  return res.status(201).json({ room, hostPlayer });
+  // Create on-chain game via GameFactory (synchronous – room response must include chain data
+  // so the frontend can trigger TIP20 approval + registerPlayer)
+  if (chainService) {
+    try {
+      const { gameManagerAddress } = await chainService.createGame(
+        maxPlayers,
+        STAKE_TOKEN_ADDRESS as `0x${string}`,
+        BigInt(DEFAULT_STAKE_AMOUNT),
+      );
+      roomManager.setChainData(room.code, {
+        gameManagerAddress,
+        stakeTokenAddress: STAKE_TOKEN_ADDRESS,
+        stakeAmount: DEFAULT_STAKE_AMOUNT,
+      });
+      logServer('chain:game_created', { roomCode: room.code, gameManagerAddress });
+    } catch (err) {
+      logServer('chain:game_create_failed', { roomCode: room.code, error: String(err) });
+    }
+  }
+
+  // Re-fetch room so response includes chain data
+  const updatedRoom = roomManager.getRoom(room.code) ?? room;
+  return res.status(201).json({ room: updatedRoom, hostPlayer });
 });
 
 const startRoomSchema = z.object({
   hostPlayerId: z.string().min(1)
 });
 
-app.post('/api/rooms/:code/start', (req, res) => {
+app.post('/api/rooms/:code/start', async (req, res) => {
   const room = roomManager.getRoom(req.params.code);
   if (!room) {
     return res.status(404).json({ error: 'Room not found' });
@@ -116,8 +157,119 @@ app.post('/api/rooms/:code/start', (req, res) => {
   }
 
   const updated = roomManager.startGame(room.code);
+
+  // Start on-chain game + deploy sub-contracts (non-blocking)
+  const chainData = roomManager.getChainData(room.code);
+  if (chainService && chainData?.gameManagerAddress) {
+    (async () => {
+      try {
+        const players = await chainService!.getRegisteredPlayers(
+          chainData.gameManagerAddress as `0x${string}`,
+        );
+
+        const chainState = await chainService!.startAndInitialize(
+          chainData.gameManagerAddress as `0x${string}`,
+          chainData.stakeTokenAddress as `0x${string}`,
+          players,
+        );
+
+        roomManager.setChainData(room.code, {
+          ...chainData,
+          itemRecorderAddress: chainState.itemRecorderAddress,
+          killRecorderAddress: chainState.killRecorderAddress,
+          positionRecorderAddress: chainState.positionRecorderAddress,
+          livePredictionMarketAddress: chainState.livePredictionMarketAddress,
+          staticPredictionMarketAddress: chainState.staticPredictionMarketAddress,
+          players: players as string[],
+        });
+
+        // Start recording
+        const recorder = new RecorderService();
+        recorder.start(
+          {
+            itemRecorderAddress: chainState.itemRecorderAddress!,
+            killRecorderAddress: chainState.killRecorderAddress!,
+            positionRecorderAddress: chainState.positionRecorderAddress!,
+          },
+          () => roomManager.getPlayersSnapshot(room.code),
+        );
+        recorderServices.set(room.code, recorder);
+
+        logServer('chain:game_started', {
+          roomCode: room.code,
+          ...chainState,
+        });
+      } catch (err) {
+        logServer('chain:game_start_failed', {
+          roomCode: room.code,
+          error: String(err),
+        });
+      }
+    })();
+  }
+
   io.to(room.code).emit('room:game_started', { room: updated });
   return res.json({ room: updated });
+});
+
+// End a game — determines winner (most kills) and most deaths, resolves on-chain
+const endRoomSchema = z.object({
+  hostPlayerId: z.string().min(1),
+});
+
+app.post('/api/rooms/:code/end', async (req, res) => {
+  const room = roomManager.getRoom(req.params.code);
+  if (!room) {
+    return res.status(404).json({ error: 'Room not found' });
+  }
+
+  const parsed = endRoomSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ error: parsed.error.flatten() });
+  }
+
+  if (room.hostPlayerId !== parsed.data.hostPlayerId) {
+    return res.status(403).json({ error: 'Only host can end the game' });
+  }
+
+  // Determine winner (most kills) and most deaths
+  const players = room.players;
+  const sortedByKills = [...players].sort((a, b) => (b.kills ?? 0) - (a.kills ?? 0));
+  const sortedByDeaths = [...players].sort((a, b) => (b.deaths ?? 0) - (a.deaths ?? 0));
+  const winner = sortedByKills[0];
+  const mostDeathsPlayer = sortedByDeaths[0];
+
+  // Stop recorder
+  const recorder = recorderServices.get(room.code);
+  if (recorder) {
+    recorder.stop();
+    recorderServices.delete(room.code);
+  }
+
+  const updated = roomManager.endGame(room.code);
+
+  // End on-chain
+  const chainData = roomManager.getChainData(room.code);
+  if (chainService && chainData?.gameManagerAddress) {
+    chainService
+      .endGame(
+        chainData.gameManagerAddress as `0x${string}`,
+        (winner?.walletAddress ?? '0x0000000000000000000000000000000000000000') as `0x${string}`,
+        (mostDeathsPlayer?.walletAddress ?? '0x0000000000000000000000000000000000000000') as `0x${string}`,
+      )
+      .then(() => logServer('chain:game_ended', { roomCode: room.code }))
+      .catch((err) => logServer('chain:game_end_failed', { roomCode: room.code, error: String(err) }));
+  }
+
+  // Broadcast game ended
+  io.to(room.code).emit('room:game_ended', {
+    roomCode: room.code,
+    winner: winner?.id,
+    winnerName: winner?.name,
+    mostDeaths: mostDeathsPlayer?.id,
+  });
+
+  return res.json({ room: updated, winner: winner?.id, mostDeaths: mostDeathsPlayer?.id });
 });
 
 const server = http.createServer(app);
@@ -368,6 +520,86 @@ io.on('connection', (socket) => {
     io.to(event.roomCode).emit('room:item', {
       ...event,
       ts: ts ?? Date.now()
+    });
+
+    // Record item usage on-chain
+    if (kind === 'use') {
+      const recorder = recorderServices.get(roomCode.toUpperCase());
+      if (recorder) {
+        const player = roomManager.getPlayersSnapshot(roomCode).find((p) => p.id === playerId);
+        const dir = Math.round(Math.atan2(payload?.dirY as number ?? 0, payload?.dirX as number ?? 1) * (180 / Math.PI));
+        recorder.recordItem(
+          player?.walletAddress as `0x${string}` | undefined,
+          itemType,
+          dir,
+        ).catch((err) => logServer('chain:item_record_failed', { error: String(err) }));
+      }
+    }
+  });
+
+  // Handle damage / kill events — these come from the game client when a hit is confirmed
+  const damageSchema = z.object({
+    roomCode: z.string().min(6),
+    attackerId: z.string().min(1),
+    victimId: z.string().min(1),
+    weaponType: z.string().default('unknown'),
+    healthDepleted: z.number().int().min(0).max(100),
+    killed: z.boolean(),
+  });
+
+  socket.on('player:damage', (raw) => {
+    const parsed = damageSchema.safeParse(raw);
+    if (!parsed.success) return;
+
+    const { roomCode, attackerId, victimId, weaponType, healthDepleted, killed } = parsed.data;
+    const roomCodeUp = roomCode.toUpperCase();
+    const players = roomManager.getPlayersSnapshot(roomCodeUp);
+    const attacker = players.find((p) => p.id === attackerId);
+    const victim = players.find((p) => p.id === victimId);
+
+    if (!attacker || !victim) return;
+
+    // Update kill/death counters in RoomManager
+    if (killed) {
+      attacker.kills = (attacker.kills ?? 0) + 1;
+      victim.deaths = (victim.deaths ?? 0) + 1;
+    }
+
+    // Broadcast kill event to room (for spectator kill feed and prediction panel)
+    const killEvent: KillEvent = {
+      roomCode: roomCodeUp,
+      attackerId,
+      attackerName: attacker.name,
+      attackerWallet: attacker.walletAddress,
+      victimId,
+      victimName: victim.name,
+      victimWallet: victim.walletAddress,
+      weaponType,
+      healthDepleted,
+      killed,
+      timestamp: Date.now(),
+    };
+
+    io.to(roomCodeUp).emit('room:kill', killEvent);
+
+    // Record on-chain
+    const recorder = recorderServices.get(roomCodeUp);
+    if (recorder) {
+      recorder.recordKill(
+        attacker.walletAddress as `0x${string}` | undefined,
+        victim.walletAddress as `0x${string}` | undefined,
+        weaponType,
+        healthDepleted,
+        killed,
+      ).catch((err) => logServer('chain:kill_record_failed', { error: String(err) }));
+    }
+
+    logServer('player:damage', {
+      roomCode: roomCodeUp,
+      attacker: attackerId,
+      victim: victimId,
+      damage: healthDepleted,
+      killed,
     });
   });
 
