@@ -1,8 +1,26 @@
 {
+  "../lib/forge-std": {
+    "rev": "1801b0541f4fda118a10798fd3486bb7051c5dd6"
+  },
+  "../lib/openzeppelin-contracts-upgradeable": {
+    "rev": "aa677e9d28ed78fc427ec47ba2baef2030c58e7c"
+  },
+  "../lib/openzeppelin-foundry-upgrades": {
+    "rev": "cbce1e00305e943aa1661d43f41e5ac72c662b07"
+  },
+  "../lib/tempo-std": {
+    "rev": "6158e7c64fac437570b958de5206b54b08f15a21"
+  },
   "lib/forge-std": {
     "tag": {
       "name": "v1.14.0",
       "rev": "1801b0541f4fda118a10798fd3486bb7051c5dd6"
+    }
+  },
+  "lib/tempo-std": {
+    "tag": {
+      "name": "v0.1.5",
+      "rev": "91dfcf70289b07ec6409f289917c6d4c9ce7e73e"
     }
   }
 }
