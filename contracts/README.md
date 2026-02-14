@@ -30,7 +30,7 @@ Factory contract that mints new `GameManager` instances. Deployed once by the ba
 Central coordinator for a single game. Created by `GameFactory`.
 
 - **Registration phase** (`NotStarted`): Players register by staking TIP20 tokens. Players can deregister to reclaim their stake before the game starts.
-- **Start game** (`Running`): Backend calls `startGame()` which deploys all 5 sub-contracts (3 recorders + 2 prediction markets) and links them.
+- **Start game** (`Running`): Backend calls `startGame()` which transitions the game state. Then the backend separately deploys all 5 sub-contracts, links them via `setContracts()`, which also wires the KillRecorder to the LivePredictionMarket.
 - **End game** (`Ended`): Backend calls `endGame(winner, mostDeaths)` which stops all recorders, refunds unresolved live bets, resolves static prediction markets, and distributes the total stake to the winner.
 
 ### `ItemRecorder.sol`
@@ -123,12 +123,30 @@ Players call: GameManager.registerPlayer()
 
 ```
 Backend calls: GameManager.startGame()
-→ Deploys: ItemRecorder, KillRecorder, PositionRecorder, LivePredictionMarket, StaticPredictionMarket
-→ Links KillRecorder → LivePredictionMarket
-→ Emits GameStarted and ContractsInitialized with all contract addresses
+→ State transitions to Running
+→ Emits GameStarted
 ```
 
-### 5. End the Game
+### 5. Deploy Sub-Contracts and Link
+
+```
+Backend deploys independently:
+  - ItemRecorder(owner, gameManagerAddress)
+  - KillRecorder(owner, gameManagerAddress)
+  - PositionRecorder(owner, gameManagerAddress)
+  - LivePredictionMarket(stakeTokenAddress, killRecorderAddress, gameManagerAddress, players)
+  - StaticPredictionMarket(stakeTokenAddress, gameManagerAddress, players)
+
+Backend calls: GameManager.setContracts(
+    itemRecorderAddr, killRecorderAddr, positionRecorderAddr,
+    livePredictionMarketAddr, staticPredictionMarketAddr
+)
+→ Stores all contract references
+→ Internally links KillRecorder → LivePredictionMarket
+→ Emits ContractsInitialized
+```
+
+### 6. End the Game
 
 ```
 Backend calls: GameManager.endGame(winnerAddress, mostDeathsAddress)
@@ -176,6 +194,8 @@ The backend is the `owner` of all contracts and is responsible for game lifecycl
 |------|----------|----------|--------|
 | Create game | `GameFactory` | `createGame(playerCap, stakeToken, stakeAmount)` | Owner |
 | Start game | `GameManager` | `startGame()` | Owner |
+| Deploy sub-contracts | Backend deploys each contract individually | — | Owner |
+| Link contracts | `GameManager` | `setContracts(...)` | Owner |
 | End game | `GameManager` | `endGame(winner, mostDeaths)` | Owner |
 
 ### During the Game (Recording)
@@ -217,7 +237,7 @@ Backend → GameManager.endGame(winner, mostDeaths)
 | Contract | `owner` (backend) | `gameManager` (GameManager contract) |
 |----------|-------------------|--------------------------------------|
 | `GameFactory` | `createGame()` | — |
-| `GameManager` | `startGame()`, `endGame()` | — |
+| `GameManager` | `startGame()`, `setContracts()`, `endGame()` | — |
 | `ItemRecorder` | `addEvent()` | `endGame()` |
 | `KillRecorder` | `addEvent()` | `setLivePredictionMarket()`, `endGame()` |
 | `PositionRecorder` | `addRecord()` | `endGame()` |
@@ -234,4 +254,21 @@ Backend → GameManager.endGame(winner, mostDeaths)
 cd contracts
 forge build
 forge test
+```
+
+## Deployment (Tempo Testnet)
+
+```shell
+export TEMPO_RPC_URL=https://rpc.moderato.tempo.xyz
+export PRIVATE_KEY=<your_private_key>
+
+# Fund wallet
+cast wallet new
+cast rpc tempo_fundAddress <YOUR_WALLET_ADDRESS> --rpc-url $TEMPO_RPC_URL
+
+# Deploy GameFactory
+forge create src/GameFactory.sol:GameFactory \
+  --rpc-url $TEMPO_RPC_URL \
+  --private-key $PRIVATE_KEY \
+  --broadcast --verify
 ```

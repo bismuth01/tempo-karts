@@ -37,10 +37,10 @@ contract LivePredictionMarket {
     error OnlyKillRecorder();
     error OnlyGameManager();
 
-    constructor(address _marketToken, address _killRecorder, address[] memory _players) {
+    constructor(address _marketToken, address _killRecorder, address _gameManager, address[] memory _players) {
         marketToken = ITIP20(_marketToken);
         killRecorderAddress = _killRecorder;
-        gameManagerAddress = msg.sender;
+        gameManagerAddress = _gameManager;
         gameState = GameState.Running;
         currentRound = 0;
 

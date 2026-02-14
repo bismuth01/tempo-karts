@@ -20,9 +20,9 @@ contract ItemRecorder {
 
     error GameNotRunning();
 
-    constructor(address _owner) {
+    constructor(address _owner, address _gameManager) {
         owner = _owner;
-        gameManager = msg.sender;
+        gameManager = _gameManager;
         gameState = GameState.Running;
     }
 

@@ -49,6 +49,7 @@ contract GameManager {
     error StakeAmountNotSet(uint currStakeAmount);
     error TokenTransferFailed(address spender, uint256 amount);
     error NoPlayersRegistered();
+    error ContractsAlreadySet();
 
     constructor (
         string memory _gameId, 
@@ -119,39 +120,39 @@ contract GameManager {
         emit PlayerLeft(gameId, msg.sender);
     }
 
-    /// @notice Backend starts the game — deploys all recorder and prediction market contracts.
+    /// @notice Backend starts the game. Sub-contracts must be set via setContracts() before or after.
     function startGame() external isOwner inState(GameState.NotStarted) {
         if (playerNumber == 0) revert NoPlayersRegistered();
-
         gameState = GameState.Running;
+        emit GameStarted(gameId, block.timestamp);
+    }
 
-        // Deploy recorder contracts (owner = backend for data recording, gameManager = this for lifecycle)
-        itemRecorder = new ItemRecorder(owner);
-        killRecorder = new KillRecorder(owner);
-        positionRecorder = new PositionRecorder(owner);
+    /// @notice Backend sets the pre-deployed sub-contract addresses. Can only be called once while Running.
+    function setContracts(
+        address _itemRecorder,
+        address _killRecorder,
+        address _positionRecorder,
+        address _livePredictionMarket,
+        address _staticPredictionMarket
+    ) external isOwner inState(GameState.Running) {
+        if (address(itemRecorder) != address(0)) revert ContractsAlreadySet();
 
-        // Deploy prediction market contracts
-        livePredictionMarket = new LivePredictionMarket(
-            address(stakeToken),
-            address(killRecorder),
-            players
-        );
-        staticPredictionMarket = new StaticPredictionMarket(
-            address(stakeToken),
-            players
-        );
+        itemRecorder = ItemRecorder(_itemRecorder);
+        killRecorder = KillRecorder(_killRecorder);
+        positionRecorder = PositionRecorder(_positionRecorder);
+        livePredictionMarket = LivePredictionMarket(_livePredictionMarket);
+        staticPredictionMarket = StaticPredictionMarket(_staticPredictionMarket);
 
         // Link KillRecorder → LivePredictionMarket so kills auto-resolve live bets
-        killRecorder.setLivePredictionMarket(address(livePredictionMarket));
+        killRecorder.setLivePredictionMarket(_livePredictionMarket);
 
-        emit GameStarted(gameId, block.timestamp);
         emit ContractsInitialized(
             gameId,
-            address(itemRecorder),
-            address(killRecorder),
-            address(positionRecorder),
-            address(livePredictionMarket),
-            address(staticPredictionMarket)
+            _itemRecorder,
+            _killRecorder,
+            _positionRecorder,
+            _livePredictionMarket,
+            _staticPredictionMarket
         );
     }
 

@@ -35,9 +35,9 @@ contract StaticPredictionMarket {
     error OnlyGameManager();
     error MarketAlreadyResolved();
 
-    constructor(address _marketToken, address[] memory _players) {
+    constructor(address _marketToken, address _gameManager, address[] memory _players) {
         marketToken = ITIP20(_marketToken);
-        gameManagerAddress = msg.sender;
+        gameManagerAddress = _gameManager;
         gameState = GameState.Running;
 
         for (uint i = 0; i < _players.length; i++) {
