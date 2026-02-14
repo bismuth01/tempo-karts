@@ -64,9 +64,6 @@ export type PositionPayload = {
     position: Vec2;
     velocity?: Vec2;
     rotation?: number;
-    hp?: number;
-    isAlive?: boolean;
-    respawnAt?: number | null;
     ts?: number;
 };
 

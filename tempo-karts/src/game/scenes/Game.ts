@@ -238,6 +238,10 @@ export class Game extends Scene
             this.syncLocalAliveVisibility(localSnapshot, true);
             this.updateRespawnCountdown(localSnapshot);
         }
+        else
+        {
+            this.updateRespawnCountdown(null);
+        }
 
         this.bindMultiplayerEvents();
         this.hydrateRemotePlayersFromRoom(session.room);
@@ -333,6 +337,11 @@ export class Game extends Scene
             this.syncLocalAliveVisibility(me);
             this.updateRespawnCountdown(me);
         }
+        else
+        {
+            this.updateRespawnCountdown(null);
+        }
+
         this.hydrateRemotePlayersFromRoom(payload.room);
         this.syncCratesFromRoom(payload.room);
         this.refreshHudFromRoom(payload.room);
@@ -468,13 +477,14 @@ export class Game extends Scene
             }
 
             remoteIds.add(player.id);
+            const remote = this.ensureRemotePlayer(player.id, player.position.x, player.position.y);
+
             if (!player.isAlive)
             {
                 this.setRemoteEntityVisibility(player.id, false);
                 return;
             }
 
-            const remote = this.ensureRemotePlayer(player.id, player.position.x, player.position.y);
             this.setRemoteEntityVisibility(player.id, true);
             remote.setPosition(player.position.x, player.position.y);
             this.applyDirectionToSprite(remote, player.velocity.x, player.velocity.y);
@@ -526,6 +536,94 @@ export class Game extends Scene
         remote.destroy();
         this.remotePlayers.delete(playerId);
         this.removeRemotePlayerHud(playerId);
+    }
+
+    private ensureRemotePlayerHud (playerId: string)
+    {
+        let hud = this.remotePlayerHud.get(playerId);
+        if (!hud)
+        {
+            const walletText = this.add.text(0, 0, 'player...', {
+                fontFamily: 'Cinzel',
+                fontSize: '15px',
+                color: '#fff2cf',
+                stroke: '#2a170d',
+                strokeThickness: 3
+            }).setOrigin(0.5, 1).setDepth(62);
+
+            const healthBg = this.add.rectangle(0, 0, 74, 10, 0x23120a, 0.9)
+                .setOrigin(0.5, 0.5)
+                .setDepth(61);
+
+            const healthFill = this.add.rectangle(0, 0, 68, 6, 0x60d96d, 1)
+                .setOrigin(0, 0.5)
+                .setDepth(62);
+
+            hud = { walletText, healthBg, healthFill };
+            this.remotePlayerHud.set(playerId, hud);
+        }
+
+        return hud;
+    }
+
+    private syncRemotePlayerHud (player: PlayerState)
+    {
+        const remote = this.remotePlayers.get(player.id);
+        if (!remote)
+        {
+            return;
+        }
+
+        if (!player.isAlive)
+        {
+            this.setRemoteEntityVisibility(player.id, false);
+            return;
+        }
+
+        const hud = this.ensureRemotePlayerHud(player.id);
+        hud.walletText.setText(this.getRemoteWalletLabel(player));
+        this.applyHealthBar(hud.healthFill, player.hp, 68);
+        this.updateRemoteHudPosition(player.id);
+    }
+
+    private updateRemotePlayerHudPositions ()
+    {
+        for (const playerId of this.remotePlayerHud.keys())
+        {
+            this.updateRemoteHudPosition(playerId);
+        }
+    }
+
+    private updateRemoteHudPosition (playerId: string)
+    {
+        const remote = this.remotePlayers.get(playerId);
+        const hud = this.remotePlayerHud.get(playerId);
+        if (!remote || !hud)
+        {
+            return;
+        }
+
+        const labelOffsetY = 62;
+        const barOffsetY = 48;
+        const barWidth = 68;
+
+        hud.walletText.setPosition(remote.x, remote.y - labelOffsetY);
+        hud.healthBg.setPosition(remote.x, remote.y - barOffsetY);
+        hud.healthFill.setPosition((remote.x - (barWidth / 2)), remote.y - barOffsetY);
+    }
+
+    private removeRemotePlayerHud (playerId: string)
+    {
+        const hud = this.remotePlayerHud.get(playerId);
+        if (!hud)
+        {
+            return;
+        }
+
+        hud.walletText.destroy();
+        hud.healthBg.destroy();
+        hud.healthFill.destroy();
+        this.remotePlayerHud.delete(playerId);
     }
 
     private setRemoteEntityVisibility (playerId: string, visible: boolean)
@@ -593,95 +691,6 @@ export class Game extends Scene
         const seconds = Math.max(0, Math.ceil((player.respawnAt - Date.now()) / 1000));
         this.hudDom.respawnCountdown.textContent = `RESPAWNING IN ${seconds}s`;
         this.hudDom.respawnCountdown.style.display = 'block';
-    }
-
-    private ensureRemotePlayerHud (playerId: string)
-    {
-        let hud = this.remotePlayerHud.get(playerId);
-        if (!hud)
-        {
-            const walletText = this.add.text(0, 0, 'player...', {
-                fontFamily: 'Cinzel',
-                fontSize: '15px',
-                color: '#fff2cf',
-                stroke: '#2a170d',
-                strokeThickness: 3
-            }).setOrigin(0.5, 1).setDepth(62);
-
-            const healthBg = this.add.rectangle(0, 0, 74, 10, 0x23120a, 0.9)
-                .setOrigin(0.5, 0.5)
-                .setDepth(61);
-
-            const healthFill = this.add.rectangle(0, 0, 68, 6, 0x60d96d, 1)
-                .setOrigin(0, 0.5)
-                .setDepth(62);
-
-            hud = { walletText, healthBg, healthFill };
-            this.remotePlayerHud.set(playerId, hud);
-        }
-
-        return hud;
-    }
-
-    private syncRemotePlayerHud (player: PlayerState)
-    {
-        const remote = this.remotePlayers.get(player.id);
-        if (!remote)
-        {
-            return;
-        }
-
-        if (!player.isAlive)
-        {
-            this.setRemoteEntityVisibility(player.id, false);
-            return;
-        }
-
-        const hud = this.ensureRemotePlayerHud(player.id);
-        hud.walletText.setText(this.getRemoteWalletLabel(player));
-        this.applyHealthBar(hud.healthFill, player.hp, 68);
-        this.setRemoteEntityVisibility(player.id, true);
-        this.updateRemoteHudPosition(player.id);
-    }
-
-    private updateRemotePlayerHudPositions ()
-    {
-        for (const playerId of this.remotePlayerHud.keys())
-        {
-            this.updateRemoteHudPosition(playerId);
-        }
-    }
-
-    private updateRemoteHudPosition (playerId: string)
-    {
-        const remote = this.remotePlayers.get(playerId);
-        const hud = this.remotePlayerHud.get(playerId);
-        if (!remote || !hud)
-        {
-            return;
-        }
-
-        const labelOffsetY = 62;
-        const barOffsetY = 48;
-        const barWidth = 68;
-
-        hud.walletText.setPosition(remote.x, remote.y - labelOffsetY);
-        hud.healthBg.setPosition(remote.x, remote.y - barOffsetY);
-        hud.healthFill.setPosition((remote.x - (barWidth / 2)), remote.y - barOffsetY);
-    }
-
-    private removeRemotePlayerHud (playerId: string)
-    {
-        const hud = this.remotePlayerHud.get(playerId);
-        if (!hud)
-        {
-            return;
-        }
-
-        hud.walletText.destroy();
-        hud.healthBg.destroy();
-        hud.healthFill.destroy();
-        this.remotePlayerHud.delete(playerId);
     }
 
     private syncCratesFromRoom (room: RoomState)
@@ -1050,7 +1059,6 @@ export class Game extends Scene
         }
 
         const body = this.player.body as Phaser.Physics.Arcade.Body;
-        const localPlayer = session.room.players.find((player) => player.id === session.playerId);
 
         const payload: PositionPayload = {
             roomCode: session.roomCode,
@@ -1109,7 +1117,6 @@ export class Game extends Scene
         this.cratePickupAttemptAt.clear();
         this.placedBombVisuals.forEach((bomb) => bomb.destroy());
         this.placedBombVisuals.clear();
-        this.localIsAlive = true;
 
         [
             this.hudTopPanel,
@@ -1403,7 +1410,7 @@ export class Game extends Scene
             fontSize: '17px',
             fontWeight: '700',
             letterSpacing: '1.4px',
-            color: '#f8eacd',
+            color: '#000000',
             textAlign: 'right'
         });
 
@@ -1817,8 +1824,7 @@ export class Game extends Scene
                 this.applyHudSpritePanels();
                 const session = this.multiplayerSession;
                 const me = session?.room.players.find((player) => player.id === session.playerId);
-                this.applyLocalHealth(me ? (me.isAlive ? me.hp : 0) : 100);
-                this.updateRespawnCountdown(me ?? null);
+                this.applyLocalHealth(me?.hp ?? 100);
                 this.updateHudWeaponIcon(this.hudWeaponType);
             };
         }
@@ -1936,7 +1942,6 @@ export class Game extends Scene
         if (!me)
         {
             this.applyLocalHealth(100);
-            this.updateRespawnCountdown(null);
             this.localWeaponText?.setText('None');
             this.localWeaponIcon?.setFrame('slot_small_question');
             if (this.hudDom)
@@ -1948,7 +1953,6 @@ export class Game extends Scene
         }
 
         this.applyLocalHealth(me.isAlive ? me.hp : 0);
-        this.updateRespawnCountdown(me);
         this.applyLocalWeapon(me);
     }
 
@@ -2059,7 +2063,7 @@ export class Game extends Scene
                 return `RESPAWN ${secondsLeft}s`;
             }
 
-            return 'Respawning';
+            return 'RESPAWNING';
         }
 
         if (!player.activeWeaponType || !player.activeWeaponExpiresAt)
@@ -2098,11 +2102,6 @@ export class Game extends Scene
 
     private hasActiveWeapon (player: PlayerState)
     {
-        if (!player.isAlive)
-        {
-            return false;
-        }
-
         if (!player.activeWeaponType)
         {
             return false;
