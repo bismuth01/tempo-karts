@@ -9,6 +9,12 @@ import type {
     RoomState
 } from '../net/multiplayer';
 import { applyDirectionPose, KART_SPIN_POSE_ORDER } from '../kartDirection';
+import {
+    toReadableError,
+    type EnsurePlayerRegisteredResult,
+    type OnChainAction,
+    type OnChainContractStatus
+} from '../../chain/contracts';
 
 type MenuMode = 'create' | 'join';
 
@@ -25,7 +31,16 @@ type CreateRoomResponse = {
     hostPlayer: {
         id: string;
     };
+    onChain?: RoomState['onChain'];
 };
+
+type RoomLookupResponse = {
+    room: RoomState;
+};
+
+const DEFAULT_DURATION_SECONDS = 180;
+const MIN_DURATION_SECONDS = 30;
+const MAX_DURATION_SECONDS = 3600;
 
 export class MainMenu extends Scene {
     private background!: GameObjects.TileSprite;
@@ -55,9 +70,19 @@ export class MainMenu extends Scene {
 
     private roomCodeInput: HTMLInputElement | null = null;
     private roomInputResizeHandler?: () => void;
+    private durationSecondsInput: HTMLInputElement | null = null;
+    private durationInputResizeHandler?: () => void;
 
     private activeSocket?: GameSocket;
     private popupBusy = false;
+    private contractStatus: OnChainContractStatus = {
+        configured: false,
+        ready: false,
+        walletAddress: null,
+        gameManagerAddress: null,
+        expectedChainId: null,
+        reason: 'Waiting for contract bridge'
+    };
 
     private readonly serverBaseUrl = (process.env.NEXT_PUBLIC_SERVER_URL ?? 'http://localhost:4000').replace(/\/$/, '');
 
@@ -153,7 +178,9 @@ export class MainMenu extends Scene {
 
     private onSceneShutdown = () => {
         EventBus.removeListener('privy-status-changed', this.handlePrivyStatus);
+        EventBus.removeListener('contract-status-changed', this.handleContractStatus);
         this.removeRoomCodeInput();
+        this.removeDurationInput();
         this.clearBackgroundBlur();
 
         if (this.activeSocket) {
@@ -423,8 +450,12 @@ export class MainMenu extends Scene {
         const { width, height } = this.scale;
 
         const panelWidth = 900;
-        const panelHeight = 520;
+        const panelHeight = 620;
         const container = this.add.container(width / 2, height / 2);
+        const fieldY = mode === 'create' ? 36 : 58;
+        const infoY = mode === 'create' ? 178 : 124;
+        const primaryY = mode === 'create' ? 246 : 188;
+        const cancelY = mode === 'create' ? 300 : 274;
 
         const center = this.add.tileSprite(0, 0, panelWidth, panelHeight, 'sprite-sheet', 'tile_dirt');
 
@@ -447,7 +478,7 @@ export class MainMenu extends Scene {
 
         const subLabel = this.add.text(
             0,
-            -40,
+            -58,
             mode === 'create' ? 'Set room details and start a new match' : 'Enter room code to join an existing match',
             {
                 fontFamily: 'Cinzel',
@@ -459,9 +490,9 @@ export class MainMenu extends Scene {
             }
         ).setOrigin(0.5);
 
-        const field = this.add.tileSprite(0, 58, 640, 92, 'sprite-sheet', 'timer_board_large');
+        const field = this.add.tileSprite(0, fieldY, 640, 92, 'sprite-sheet', 'timer_board_large');
 
-        const fieldText = this.add.text(0, 58, mode === 'create' ? 'Room: (will be generated)' : 'Code:', {
+        const fieldText = this.add.text(0, fieldY, mode === 'create' ? 'Room: (will be generated)' : 'Code:', {
             fontFamily: 'Cinzel',
             fontStyle: 'bold',
             fontSize: '34px',
@@ -470,26 +501,48 @@ export class MainMenu extends Scene {
             strokeThickness: 3
         }).setOrigin(0.5);
 
-        const infoText = this.add.text(0, 124, '', {
+        const infoText = this.add.text(-panelWidth / 2 + 78, infoY, '', {
             fontFamily: 'Cinzel',
             fontStyle: 'bold',
-            fontSize: '22px',
+            fontSize: '18px',
             color: '#3d2314',
             stroke: '#ffeec8',
-            strokeThickness: 2
-        }).setOrigin(0.5);
+            strokeThickness: 2,
+            align: 'left',
+            fixedWidth: panelWidth - 156,
+            wordWrap: {
+                width: panelWidth - 156,
+                useAdvancedWrap: true
+            }
+        }).setOrigin(0, 0.5);
 
         if (mode === 'join') {
             this.createRoomCodeInput(width / 2, height / 2 + 58);
             fieldText.setText('');
+            this.removeDurationInput();
+        } else {
+            this.removeRoomCodeInput();
+        }
+
+        const durationLabel = this.add.text(0, 94, 'Duration (seconds)', {
+            fontFamily: 'Cinzel',
+            fontStyle: 'bold',
+            fontSize: '30px',
+            color: '#3d2314',
+            stroke: '#ffeec8',
+            strokeThickness: 3
+        }).setOrigin(0.5).setVisible(mode === 'create');
+
+        if (mode === 'create') {
+            this.createDurationInput(width / 2, height / 2 + 130);
         }
 
         const primaryLabel = mode === 'create' ? 'CREATE' : 'JOIN';
-        const primaryAction = this.createPopupButton(0, 188, primaryLabel, () => {
+        const primaryAction = this.createPopupButton(0, primaryY, primaryLabel, () => {
             void this.handlePopupPrimaryAction(mode, fieldText, infoText);
         });
 
-        const closeAction = this.createPopupButton(0, 274, 'CANCEL', () => {
+        const closeAction = this.createPopupButton(0, cancelY, 'CANCEL', () => {
             this.closePopup();
         }, 'slot_med_stone');
 
@@ -503,6 +556,7 @@ export class MainMenu extends Scene {
             subLabel,
             field,
             fieldText,
+            durationLabel,
             infoText,
             primaryAction,
             closeAction
@@ -537,7 +591,7 @@ export class MainMenu extends Scene {
     }
 
     private async createRoomFlow (fieldText: GameObjects.Text, infoText: GameObjects.Text) {
-        infoText.setText('Creating room...');
+        infoText.setText('Creating on-chain room...');
 
         const response = await fetch(`${this.serverBaseUrl}/api/rooms`, {
             method: 'POST',
@@ -547,7 +601,8 @@ export class MainMenu extends Scene {
             body: JSON.stringify({
                 hostName: this.playerNameValueText.text || 'VillageRacer',
                 walletAddress: this.walletAddress ?? undefined,
-                maxPlayers: 4
+                maxPlayers: 4,
+                durationSeconds: this.readDurationSeconds()
             })
         });
 
@@ -559,12 +614,20 @@ export class MainMenu extends Scene {
         const created = await response.json() as CreateRoomResponse;
         const roomCode = created.room?.code;
         const hostPlayerId = created.hostPlayer?.id;
+        const gameManagerAddress = created.room?.onChain?.gameManagerAddress ?? created.onChain?.gameManagerAddress ?? null;
 
         if (!roomCode || !hostPlayerId) {
             throw new Error('Invalid create-room response');
         }
 
+        if (!gameManagerAddress) {
+            throw new Error('Room creation succeeded but no on-chain GameManager was returned');
+        }
+
         fieldText.setText(`Room: ${roomCode}`);
+        await this.ensureOnChainRegistration(infoText, gameManagerAddress);
+        await this.startRoomFlow(roomCode, hostPlayerId, infoText);
+        infoText.setText('Connecting to room...');
 
         const joined = await this.connectAndJoin({
             roomCode,
@@ -586,27 +649,45 @@ export class MainMenu extends Scene {
             throw new Error('Enter a room code first');
         }
 
-        if (!roomCode.startsWith('KART-')) {
-            throw new Error('Room code format should be KART-XXXX or XXXX');
+        if (!/^KART-([A-Z0-9]{4}|[A-Z0-9]{6})$/.test(roomCode)) {
+            throw new Error('Room code format should be KART-XXXXXX or raw XXXXXX');
         }
 
+        infoText.setText('Resolving room metadata...');
+        const roomLookupResponse = await fetch(`${this.serverBaseUrl}/api/rooms/${encodeURIComponent(roomCode)}`);
+        if (!roomLookupResponse.ok) {
+            const body = await roomLookupResponse.json().catch(() => null) as { error?: string } | null;
+            throw new Error(body?.error ?? `Room lookup failed (${roomLookupResponse.status})`);
+        }
+
+        const roomLookup = await roomLookupResponse.json() as RoomLookupResponse;
+        const gameManagerAddress = roomLookup.room?.onChain?.gameManagerAddress ?? null;
+        if (!gameManagerAddress) {
+            throw new Error('Room is not linked to an on-chain GameManager');
+        }
+
+        await this.ensureOnChainRegistration(infoText, gameManagerAddress);
         infoText.setText('Joining room...');
 
         const joined = await this.connectAndJoin({
-            roomCode,
+            roomCode: roomLookup.room.code,
             role: 'player',
             playerName: this.playerNameValueText.text || 'VillageRacer',
             walletAddress: this.walletAddress ?? undefined
         });
 
         infoText.setText('Joined! Starting game...');
-        this.promoteSessionAndStartGame(joined.socket, roomCode, joined.playerId, joined.room);
+        this.promoteSessionAndStartGame(joined.socket, joined.room.code, joined.playerId, joined.room);
     }
 
     private normalizeRoomCode (rawCode: string) {
         const compact = rawCode.replace(/\s+/g, '').toUpperCase();
 
-        if (compact.length === 4) {
+        if (/^[A-Z0-9]{4}$/.test(compact)) {
+            return `KART-${compact}`;
+        }
+
+        if (/^[A-F0-9]{6}$/.test(compact)) {
             return `KART-${compact}`;
         }
 
@@ -737,6 +818,72 @@ export class MainMenu extends Scene {
         this.scale.on('resize', positionInput);
     }
 
+    private createDurationInput (x: number, y: number) {
+        this.removeDurationInput();
+
+        const input = document.createElement('input');
+        input.type = 'number';
+        input.placeholder = `${DEFAULT_DURATION_SECONDS}`;
+        input.min = `${MIN_DURATION_SECONDS}`;
+        input.max = `${MAX_DURATION_SECONDS}`;
+        input.step = '1';
+        input.value = `${DEFAULT_DURATION_SECONDS}`;
+        input.autocomplete = 'off';
+        input.style.position = 'fixed';
+        input.style.width = '240px';
+        input.style.height = '56px';
+        input.style.fontSize = '30px';
+        input.style.fontFamily = 'Cinzel, serif';
+        input.style.textAlign = 'center';
+        input.style.background = 'rgba(255, 240, 209, 0.55)';
+        input.style.border = '2px solid rgba(61, 35, 20, 0.7)';
+        input.style.borderRadius = '8px';
+        input.style.color = '#2d1a10';
+        input.style.outline = 'none';
+        input.style.fontWeight = 'bold';
+        input.style.letterSpacing = '1px';
+        input.style.zIndex = '10000';
+
+        const positionInput = () => {
+            const canvas = this.game.canvas;
+            const rect = canvas.getBoundingClientRect();
+            const screenX = rect.left + (x / this.scale.width) * rect.width;
+            const screenY = rect.top + (y / this.scale.height) * rect.height;
+
+            input.style.left = `${screenX}px`;
+            input.style.top = `${screenY}px`;
+            input.style.transform = 'translate(-50%, -50%)';
+        };
+
+        positionInput();
+        document.body.appendChild(input);
+        input.focus();
+        input.select();
+
+        this.durationSecondsInput = input;
+        this.durationInputResizeHandler = positionInput;
+        this.scale.on('resize', positionInput);
+    }
+
+    private removeDurationInput () {
+        if (this.durationSecondsInput) {
+            this.durationSecondsInput.remove();
+            this.durationSecondsInput = null;
+        }
+
+        if (this.durationInputResizeHandler) {
+            this.scale.off('resize', this.durationInputResizeHandler);
+            this.durationInputResizeHandler = undefined;
+        }
+    }
+
+    private readDurationSeconds () {
+        const raw = this.durationSecondsInput?.value?.trim() ?? '';
+        const parsed = Number.parseInt(raw, 10);
+        const safe = Number.isFinite(parsed) ? parsed : DEFAULT_DURATION_SECONDS;
+        return Phaser.Math.Clamp(safe, MIN_DURATION_SECONDS, MAX_DURATION_SECONDS);
+    }
+
     private removeRoomCodeInput () {
         if (this.roomCodeInput) {
             this.roomCodeInput.remove();
@@ -752,6 +899,7 @@ export class MainMenu extends Scene {
     private closePopup () {
         this.popupBusy = false;
         this.removeRoomCodeInput();
+        this.removeDurationInput();
 
         if (this.popupContainer) {
             this.popupContainer.destroy(true);
@@ -810,7 +958,9 @@ export class MainMenu extends Scene {
 
     private bindPrivyEvents () {
         EventBus.on('privy-status-changed', this.handlePrivyStatus);
+        EventBus.on('contract-status-changed', this.handleContractStatus);
         EventBus.emit('privy-status-request');
+        EventBus.emit('contract-status-request');
     }
 
     private handlePrivyStatus = (payload: PrivyStatusPayload) => {
@@ -847,6 +997,67 @@ export class MainMenu extends Scene {
         this.walletActionText.setAlpha(1);
     };
 
+    private handleContractStatus = (payload: OnChainContractStatus) => {
+        this.contractStatus = payload;
+    };
+
+    private async ensureOnChainRegistration (infoText: GameObjects.Text, gameManagerAddress: string | null) {
+        if (!this.contractStatus.ready) {
+            throw new Error(`On-chain unavailable: ${this.contractStatus.reason}`);
+        }
+
+        if (!gameManagerAddress) {
+            throw new Error('Room is not linked to an on-chain GameManager');
+        }
+
+        infoText.setText('On-chain: preparing registration...');
+        const registration = await this.requestContractAction<EnsurePlayerRegisteredResult>('register-player', {
+            gameManagerAddress
+        });
+
+        const registrationText = registration.alreadyRegistered
+            ? 'On-chain: already registered'
+            : 'On-chain: registration complete';
+
+        this.registry.set('contract:player-registration', {
+            ...registration,
+            syncedAt: Date.now()
+        });
+
+        infoText.setText(registrationText);
+    }
+
+    private async startRoomFlow (roomCode: string, hostPlayerId: string, infoText: GameObjects.Text) {
+        infoText.setText('Starting match on-chain...');
+
+        const response = await fetch(`${this.serverBaseUrl}/api/rooms/${encodeURIComponent(roomCode)}/start`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ hostPlayerId })
+        });
+
+        if (!response.ok) {
+            const body = await response.json().catch(() => null) as { error?: string } | null;
+            throw new Error(body?.error ?? `Start game failed (${response.status})`);
+        }
+    }
+
+    private requestContractAction<T> (
+        action: OnChainAction,
+        payload?: { playerAddress?: string; gameManagerAddress?: string }
+    ) {
+        return new Promise<T>((resolve, reject) => {
+            EventBus.emit('contract-action-request', {
+                action,
+                payload,
+                resolve,
+                reject
+            });
+        });
+    }
+
     private shortenAddress (address: string | null): string {
         if (!address) {
             return 'No Wallet';
@@ -876,10 +1087,11 @@ export class MainMenu extends Scene {
     }
 
     private getErrorMessage (error: unknown) {
-        if (error instanceof Error && error.message) {
-            return error.message;
+        const message = toReadableError(error);
+        if (message.length <= 200) {
+            return message;
         }
 
-        return 'Something went wrong. Please try again.';
+        return `${message.slice(0, 197).trimEnd()}...`;
     }
 }

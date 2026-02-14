@@ -7,6 +7,49 @@ export type Vec2 = {
 
 export type WeaponType = 'rocket' | 'bomb' | 'bullet';
 
+export type RoomOnChainContracts = {
+  itemRecorder: string;
+  killRecorder: string;
+  positionRecorder: string;
+  livePredictionMarket: string;
+  staticPredictionMarket: string;
+};
+
+export type RoomOnChainState = {
+  chainId: number;
+  gameId: string;
+  gameManagerAddress: string;
+  createTxHash: string;
+  startTxHash: string | null;
+  contracts: RoomOnChainContracts | null;
+};
+
+export type MatchEndReason = 'time_elapsed' | 'manual' | 'server_error';
+
+export type MatchLeaderboardEntry = {
+  playerId: string;
+  name: string;
+  walletAddress: string | null;
+  kills: number;
+  deaths: number;
+};
+
+export type RoomMatchState = {
+  durationSeconds: number;
+  startedAt: number | null;
+  endsAt: number | null;
+  remainingSeconds: number;
+  finishedAt: number | null;
+  winnerPlayerId: string | null;
+  winnerWalletAddress: string | null;
+  mostDeathsPlayerId: string | null;
+  mostDeathsWalletAddress: string | null;
+  endReason: MatchEndReason | null;
+  payoutTxHash: string | null;
+  payoutError: string | null;
+  leaderboard: MatchLeaderboardEntry[];
+};
+
 export type PlayerState = {
   id: string;
   name: string;
@@ -63,6 +106,8 @@ export type RoomState = {
   hostPlayerId: string;
   maxPlayers: number;
   status: 'lobby' | 'in-progress' | 'finished';
+  onChain: RoomOnChainState | null;
+  match: RoomMatchState;
   players: PlayerState[];
   crateSlots: CrateSlotState[];
   spectators: number;

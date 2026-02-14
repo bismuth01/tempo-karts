@@ -14,9 +14,27 @@ Basic backend scaffold for room-based multiplayer sync.
 ## Run
 
 1. Install dependencies
-2. Start dev server
+2. Configure `.env` values for chain integration
+3. Start dev server
 
 The API listens on `PORT` (default `4000`).
+
+## Chain Env Vars
+
+- `TEMPO_RPC_URL`
+- `CHAIN_ID` (default `42431`)
+- `OWNER_PRIVATE_KEY`
+- `GAME_FACTORY_ADDRESS`
+- `STAKE_TOKEN_ADDRESS`
+- `STAKE_AMOUNT_WEI`
+- `DEFAULT_PLAYER_CAP` (default `4`)
+
+Before calling `POST /api/rooms/:code/start`, build the contracts so runtime artifacts exist:
+
+```bash
+cd contracts
+forge build
+```
 
 ## HTTP Endpoints
 

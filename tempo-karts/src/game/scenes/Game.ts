@@ -10,6 +10,11 @@ import type {
     RoomState
 } from '../net/multiplayer';
 import { applyDirectionPose, getDirectionPoseIndex } from '../kartDirection';
+import {
+    type OnChainAction,
+    type OnChainContractStatus,
+    type OnChainGameSnapshot
+} from '../../chain/contracts';
 
 type RemotePlayerHud = {
     walletText: Phaser.GameObjects.Text;
@@ -21,9 +26,12 @@ type DomHudRefs = {
     root: HTMLDivElement;
     leaderboardCard: HTMLDivElement;
     healthCard: HTMLDivElement;
+    timerCard: HTMLDivElement;
     roomCard: HTMLDivElement;
     weaponCard: HTMLDivElement;
+    contractStatus: HTMLDivElement;
     leaderboard: HTMLDivElement;
+    timerValue: HTMLDivElement;
     roomCode: HTMLDivElement;
     healthValue: HTMLDivElement;
     healthBarBg: HTMLDivElement;
@@ -33,6 +41,11 @@ type DomHudRefs = {
     copyButton: HTMLButtonElement;
     copyFeedback: HTMLDivElement;
     respawnCountdown: HTMLDivElement;
+    endOverlay: HTMLDivElement;
+    endTitle: HTMLDivElement;
+    endWinner: HTMLDivElement;
+    endLeaderboard: HTMLDivElement;
+    endPayout: HTMLDivElement;
 };
 
 type HudFrameName =
@@ -111,6 +124,16 @@ export class Game extends Scene
     private lastAimDirection = new Phaser.Math.Vector2(0, 1);
     private placedBombVisuals = new Map<string, Phaser.GameObjects.Image>();
     private localIsAlive = true;
+    private contractStatus: OnChainContractStatus = {
+        configured: false,
+        ready: false,
+        walletAddress: null,
+        gameManagerAddress: null,
+        expectedChainId: null,
+        reason: 'Waiting for contract bridge'
+    };
+    private onChainSnapshot: OnChainGameSnapshot | null = null;
+    private onChainSyncTimer?: Phaser.Time.TimerEvent;
 
     constructor ()
     {
@@ -133,6 +156,7 @@ export class Game extends Scene
         this.setupCamera();
         this.createHud();
         this.setupMultiplayer();
+        this.bindOnChainEvents();
 
         this.physics.add.collider(this.player, this.wallGroup);
         this.events.once('shutdown', this.onSceneShutdown);
@@ -159,6 +183,15 @@ export class Game extends Scene
             this.localIsAlive = true;
             this.player.setVisible(true);
             this.updateRespawnCountdown(null);
+        }
+
+        const matchStatus = this.multiplayerSession?.room.status ?? null;
+        if (matchStatus === 'finished')
+        {
+            this.player.setVelocity(0, 0);
+            this.updateRemotePlayerHudPositions();
+            this.updateLocalWeaponHudFromSession();
+            return;
         }
 
         if (localState && !localState.isAlive)
@@ -206,6 +239,7 @@ export class Game extends Scene
     private onSceneShutdown = () =>
     {
         this.teardownMultiplayer();
+        this.unbindOnChainEvents();
     };
 
     private exitToMainMenu ()
@@ -251,6 +285,140 @@ export class Game extends Scene
         this.sendLocalPosition(this.time.now, true);
     }
 
+    private bindOnChainEvents ()
+    {
+        EventBus.on('contract-status-changed', this.handleContractStatusChanged);
+        EventBus.emit('contract-status-request');
+
+        this.renderOnChainHudStatus();
+        this.onChainSyncTimer = this.time.addEvent({
+            delay: 5000,
+            loop: true,
+            callback: () => {
+                void this.refreshOnChainSnapshot();
+            }
+        });
+    }
+
+    private unbindOnChainEvents ()
+    {
+        EventBus.removeListener('contract-status-changed', this.handleContractStatusChanged);
+        this.onChainSyncTimer?.remove(false);
+        this.onChainSyncTimer = undefined;
+    }
+
+    private handleContractStatusChanged = (payload: OnChainContractStatus) =>
+    {
+        this.contractStatus = payload;
+        this.renderOnChainHudStatus();
+
+        if (payload.ready)
+        {
+            void this.refreshOnChainSnapshot();
+        }
+    };
+
+    private async refreshOnChainSnapshot ()
+    {
+        const roomGameManagerAddress = this.getRoomGameManagerAddress();
+        if (!roomGameManagerAddress)
+        {
+            this.onChainSnapshot = null;
+            this.renderOnChainHudStatus();
+            return;
+        }
+
+        if (!this.contractStatus.ready)
+        {
+            this.onChainSnapshot = null;
+            this.renderOnChainHudStatus();
+            return;
+        }
+
+        try
+        {
+            const snapshot = await this.requestContractAction<OnChainGameSnapshot>('snapshot', {
+                gameManagerAddress: roomGameManagerAddress
+            });
+            this.onChainSnapshot = snapshot;
+            this.registry.set('contract:game-snapshot', snapshot);
+            this.renderOnChainHudStatus();
+        }
+        catch (_error)
+        {
+            this.onChainSnapshot = null;
+            this.renderOnChainHudStatus();
+        }
+    }
+
+    private requestContractAction<T> (
+        action: OnChainAction,
+        payload?: { playerAddress?: string; gameManagerAddress?: string }
+    )
+    {
+        return new Promise<T>((resolve, reject) => {
+            EventBus.emit('contract-action-request', {
+                action,
+                payload,
+                resolve,
+                reject
+            });
+        });
+    }
+
+    private renderOnChainHudStatus ()
+    {
+        if (!this.hudDom)
+        {
+            return;
+        }
+
+        const roomGameManagerAddress = this.getRoomGameManagerAddress();
+        if (!roomGameManagerAddress)
+        {
+            this.hudDom.contractStatus.textContent = 'ON-CHAIN: ROOM NOT LINKED';
+            return;
+        }
+
+        if (!this.contractStatus.configured)
+        {
+            this.hudDom.contractStatus.textContent = 'ON-CHAIN: DISABLED';
+            return;
+        }
+
+        if (!this.contractStatus.ready)
+        {
+            this.hudDom.contractStatus.textContent = `ON-CHAIN: ${this.contractStatus.reason}`;
+            return;
+        }
+
+        const snapshot = this.onChainSnapshot;
+        if (!snapshot)
+        {
+            this.hudDom.contractStatus.textContent = 'ON-CHAIN: SYNCING...';
+            return;
+        }
+
+        const registrationLabel = snapshot.isRegistered === true
+            ? 'REGISTERED'
+            : snapshot.isRegistered === false
+                ? 'UNREGISTERED'
+                : 'UNKNOWN';
+
+        this.hudDom.contractStatus.textContent = `ON-CHAIN: ${snapshot.gameState} • ${snapshot.playerNumber}/${snapshot.playerCap} • ${registrationLabel}`;
+    }
+
+    private getRoomGameManagerAddress ()
+    {
+        const gameManagerAddress = this.multiplayerSession?.room.onChain?.gameManagerAddress;
+        if (!gameManagerAddress)
+        {
+            return null;
+        }
+
+        return gameManagerAddress;
+    }
+
     private bindMultiplayerEvents ()
     {
         if (!this.multiplayerSession)
@@ -266,6 +434,7 @@ export class Game extends Scene
         socket.on('room:item', this.handleRoomItem);
         socket.on('room:player_joined', this.handlePlayerJoined);
         socket.on('room:player_left', this.handlePlayerLeft);
+        socket.on('room:game_finished', this.handleRoomGameFinished);
         socket.on('disconnect', this.handleSocketDisconnect);
     }
 
@@ -284,6 +453,7 @@ export class Game extends Scene
         socket.off('room:item', this.handleRoomItem);
         socket.off('room:player_joined', this.handlePlayerJoined);
         socket.off('room:player_left', this.handlePlayerLeft);
+        socket.off('room:game_finished', this.handleRoomGameFinished);
         socket.off('disconnect', this.handleSocketDisconnect);
     }
 
@@ -344,6 +514,18 @@ export class Game extends Scene
 
         this.hydrateRemotePlayersFromRoom(payload.room);
         this.syncCratesFromRoom(payload.room);
+        this.refreshHudFromRoom(payload.room);
+    };
+
+    private handleRoomGameFinished = (payload: { room: RoomState | null }) =>
+    {
+        const session = this.multiplayerSession;
+        if (!session || !payload.room || payload.room.code !== session.roomCode)
+        {
+            return;
+        }
+
+        session.room = payload.room;
         this.refreshHudFromRoom(payload.room);
     };
 
@@ -1403,6 +1585,49 @@ export class Game extends Scene
         leaderboardCard.appendChild(leaderboardTitle);
         leaderboardCard.appendChild(leaderboard);
 
+        const timerLabel = document.createElement('div');
+        timerLabel.textContent = 'MATCH TIMER';
+        Object.assign(timerLabel.style, {
+            fontFamily: 'Cinzel, Georgia, serif',
+            fontSize: '14px',
+            fontWeight: '700',
+            letterSpacing: '1.2px',
+            color: '#1a1919',
+            textAlign: 'center',
+            marginBottom: '4px'
+        });
+
+        const timerValue = document.createElement('div');
+        timerValue.textContent = '--:--';
+        Object.assign(timerValue.style, {
+            fontFamily: 'Cinzel, Georgia, serif',
+            fontSize: '28px',
+            fontWeight: '700',
+            letterSpacing: '1.5px',
+            color: '#2e1a0f',
+            textAlign: 'center',
+            lineHeight: '1.1',
+            fontVariantNumeric: 'tabular-nums'
+        });
+
+        const timerCard = document.createElement('div');
+        Object.assign(timerCard.style, {
+            position: 'absolute',
+            left: '50%',
+            top: '20px',
+            width: '240px',
+            minHeight: '82px',
+            transform: 'translateX(-50%)',
+            padding: '10px 12px',
+            boxSizing: 'border-box',
+            border: '1px solid rgba(255, 238, 196, 0.22)',
+            borderRadius: '12px',
+            background: 'rgba(68, 50, 34, 0.72)',
+            boxShadow: '0 10px 24px rgba(0, 0, 0, 0.36), inset 0 1px 0 rgba(255, 245, 212, 0.15)'
+        });
+        timerCard.appendChild(timerLabel);
+        timerCard.appendChild(timerValue);
+
         const healthTitle = document.createElement('div');
         healthTitle.textContent = 'HEALTH';
         Object.assign(healthTitle.style, {
@@ -1613,6 +1838,25 @@ export class Game extends Scene
         weaponCard.appendChild(weaponTitle);
         weaponCard.appendChild(weaponInfoRow);
 
+        const contractStatus = document.createElement('div');
+        contractStatus.textContent = 'ON-CHAIN: DISABLED';
+        Object.assign(contractStatus.style, {
+            position: 'absolute',
+            left: '50%',
+            top: '110px',
+            transform: 'translateX(-50%)',
+            fontFamily: 'Cinzel, Georgia, serif',
+            fontSize: '16px',
+            fontWeight: '700',
+            letterSpacing: '1.1px',
+            color: '#f5e6bf',
+            padding: '6px 12px',
+            borderRadius: '999px',
+            border: '1px solid rgba(255, 238, 196, 0.22)',
+            background: 'rgba(26, 18, 12, 0.58)',
+            backdropFilter: 'blur(1.5px)'
+        });
+
         const controlsHint = document.createElement('div');
         controlsHint.textContent = 'WASD / ARROWS TO DRIVE  •  SPACE TO FIRE  •  ESC TO RETURN TO MENU';
         Object.assign(controlsHint.style, {
@@ -1651,13 +1895,94 @@ export class Game extends Scene
             boxShadow: '0 12px 28px rgba(0, 0, 0, 0.38)'
         });
 
+        const endOverlay = document.createElement('div');
+        Object.assign(endOverlay.style, {
+            position: 'absolute',
+            left: '50%',
+            top: '50%',
+            transform: 'translate(-50%, -50%)',
+            width: '560px',
+            minHeight: '360px',
+            display: 'none',
+            padding: '16px',
+            boxSizing: 'border-box',
+            border: '1px solid rgba(255, 238, 196, 0.35)',
+            borderRadius: '14px',
+            background: 'rgba(18, 13, 9, 0.88)',
+            boxShadow: '0 14px 30px rgba(0, 0, 0, 0.48)',
+            pointerEvents: 'none'
+        });
+
+        const endTitle = document.createElement('div');
+        endTitle.textContent = 'MATCH FINISHED';
+        Object.assign(endTitle.style, {
+            fontFamily: 'Cinzel, Georgia, serif',
+            fontSize: '34px',
+            fontWeight: '700',
+            letterSpacing: '1px',
+            color: '#f9e6bb',
+            textAlign: 'center',
+            marginBottom: '12px'
+        });
+
+        const endWinner = document.createElement('div');
+        Object.assign(endWinner.style, {
+            fontSize: '16px',
+            fontWeight: '700',
+            color: '#f2ddad',
+            marginBottom: '12px',
+            textAlign: 'center'
+        });
+
+        const endLeaderboard = document.createElement('div');
+        Object.assign(endLeaderboard.style, {
+            whiteSpace: 'pre-line',
+            fontSize: '15px',
+            lineHeight: '1.55',
+            color: '#f3e6c7',
+            border: '1px solid rgba(255, 238, 196, 0.2)',
+            borderRadius: '10px',
+            background: 'rgba(43, 30, 20, 0.55)',
+            padding: '10px 12px',
+            minHeight: '130px'
+        });
+
+        const endPayout = document.createElement('div');
+        Object.assign(endPayout.style, {
+            marginTop: '12px',
+            fontSize: '13px',
+            lineHeight: '1.4',
+            color: '#e9d9b0',
+            textAlign: 'center'
+        });
+
+        const endCloseHint = document.createElement('div');
+        endCloseHint.textContent = 'Press ESC to return to menu';
+        Object.assign(endCloseHint.style, {
+            marginTop: '12px',
+            textAlign: 'center',
+            fontFamily: 'Cinzel, Georgia, serif',
+            fontSize: '13px',
+            letterSpacing: '0.8px',
+            color: '#f0dfb8'
+        });
+
+        endOverlay.appendChild(endTitle);
+        endOverlay.appendChild(endWinner);
+        endOverlay.appendChild(endLeaderboard);
+        endOverlay.appendChild(endPayout);
+        endOverlay.appendChild(endCloseHint);
+
         [
             leaderboardCard,
+            timerCard,
             healthCard,
             roomCard,
             weaponCard,
+            contractStatus,
             controlsHint,
-            respawnCountdown
+            respawnCountdown,
+            endOverlay
         ].forEach((element) => root.appendChild(element));
 
         parent.appendChild(root);
@@ -1666,9 +1991,12 @@ export class Game extends Scene
             root,
             leaderboardCard,
             healthCard,
+            timerCard,
             roomCard,
             weaponCard,
+            contractStatus,
             leaderboard,
+            timerValue,
             roomCode,
             healthValue,
             healthBarBg,
@@ -1677,11 +2005,17 @@ export class Game extends Scene
             weaponIcon,
             copyButton,
             copyFeedback,
-            respawnCountdown
+            respawnCountdown,
+            endOverlay,
+            endTitle,
+            endWinner,
+            endLeaderboard,
+            endPayout
         };
 
         this.applyHudSpritePanels();
         this.updateHudWeaponIcon(null);
+        this.renderOnChainHudStatus();
     }
 
     private removeHudDom ()
@@ -1707,6 +2041,7 @@ export class Game extends Scene
         }
 
         this.applyHudPanelTexture(this.hudDom.leaderboardCard, 'hud_panel_parchment', false);
+        this.applyHudPanelTexture(this.hudDom.timerCard, 'hud_panel_parchment', false);
         this.applyHudPanelTexture(this.hudDom.healthCard, 'hud_panel_stone_strip', true);
         this.applyHudPanelTexture(this.hudDom.roomCard, 'hud_panel_wood_strip', true);
         this.applyHudPanelTexture(this.hudDom.weaponCard, 'hud_panel_stone_strip', true);
@@ -1911,6 +2246,8 @@ export class Game extends Scene
         }
 
         this.setRoomConnectionStatus(room.code, session.socket.connected);
+        this.renderMatchTimer(room);
+        this.renderFinishedState(room);
 
         const rankedPlayers = [...room.players].sort((a, b) =>
             (b.kills - a.kills) ||
@@ -1954,6 +2291,93 @@ export class Game extends Scene
 
         this.applyLocalHealth(me.isAlive ? me.hp : 0);
         this.applyLocalWeapon(me);
+    }
+
+    private renderMatchTimer (room: RoomState)
+    {
+        if (!this.hudDom)
+        {
+            return;
+        }
+
+        if (room.status === 'lobby')
+        {
+            this.hudDom.timerValue.textContent = 'READY';
+            return;
+        }
+
+        const seconds = room.status === 'finished'
+            ? 0
+            : Math.max(0, room.match.remainingSeconds);
+        this.hudDom.timerValue.textContent = this.formatMatchClock(seconds);
+    }
+
+    private renderFinishedState (room: RoomState)
+    {
+        if (!this.hudDom)
+        {
+            return;
+        }
+
+        if (room.status !== 'finished')
+        {
+            this.hudDom.endOverlay.style.display = 'none';
+            return;
+        }
+
+        this.hudDom.endOverlay.style.display = 'block';
+        this.hudDom.endTitle.textContent = 'MATCH FINISHED';
+
+        const winnerEntry = room.match.winnerPlayerId
+            ? room.match.leaderboard.find((entry) => entry.playerId === room.match.winnerPlayerId) ?? null
+            : room.match.leaderboard[0] ?? null;
+        const winnerLabel = winnerEntry
+            ? `${winnerEntry.name} (${winnerEntry.kills} K / ${winnerEntry.deaths} D)`
+            : 'No winner';
+
+        this.hudDom.endWinner.textContent = `Winner: ${winnerLabel}`;
+
+        const rankedLines = room.match.leaderboard.length > 0
+            ? room.match.leaderboard.map((entry, index) =>
+                `${index + 1}. ${this.trimPlayerName(entry.name, 16)}  K:${entry.kills}  D:${entry.deaths}`
+            )
+            : ['No leaderboard data'];
+        this.hudDom.endLeaderboard.textContent = rankedLines.join('\n');
+
+        if (room.match.payoutTxHash)
+        {
+            this.hudDom.endPayout.textContent = `Rewards distributed on-chain • Tx: ${this.trimTxHash(room.match.payoutTxHash)}`;
+            this.hudDom.endPayout.style.color = '#d4f4b2';
+            return;
+        }
+
+        if (room.match.payoutError)
+        {
+            this.hudDom.endPayout.textContent = `Payout issue: ${room.match.payoutError}`;
+            this.hudDom.endPayout.style.color = '#ffd0b0';
+            return;
+        }
+
+        this.hudDom.endPayout.textContent = 'Finalizing reward distribution...';
+        this.hudDom.endPayout.style.color = '#f0e2c2';
+    }
+
+    private formatMatchClock (seconds: number)
+    {
+        const clamped = Math.max(0, Math.floor(seconds));
+        const minutes = Math.floor(clamped / 60);
+        const sec = clamped % 60;
+        return `${String(minutes).padStart(2, '0')}:${String(sec).padStart(2, '0')}`;
+    }
+
+    private trimTxHash (txHash: string)
+    {
+        if (txHash.length <= 14)
+        {
+            return txHash;
+        }
+
+        return `${txHash.slice(0, 8)}...${txHash.slice(-6)}`;
     }
 
     private updateLocalWeaponHudFromSession ()

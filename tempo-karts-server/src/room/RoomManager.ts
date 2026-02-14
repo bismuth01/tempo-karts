@@ -3,7 +3,12 @@ import type {
   AttackEvent,
   CrateSlotState,
   ItemEvent,
+  MatchEndReason,
+  MatchLeaderboardEntry,
   PlayerState,
+  RoomMatchState,
+  RoomOnChainContracts,
+  RoomOnChainState,
   RoomState,
   Vec2,
   WeaponType
@@ -14,6 +19,8 @@ type RoomRecord = {
   hostPlayerId: string;
   maxPlayers: number;
   status: 'lobby' | 'in-progress' | 'finished';
+  onChain: RoomOnChainState | null;
+  match: RoomMatchState;
   players: Map<string, PlayerState>;
   crateSlots: Map<string, CrateSlotState>;
   activeBombs: Map<string, ActiveBombState>;
@@ -62,7 +69,41 @@ type TickResult = {
   attackEvents: AttackEvent[];
 };
 
+type CreateRoomOptions = {
+  code?: string;
+  hostName: string;
+  walletAddress?: string;
+  maxPlayers?: number;
+  durationSeconds?: number;
+  onChain?: RoomOnChainState | null;
+};
+
+type RoomFinishCandidate = {
+  roomCode: string;
+  gameManagerAddress: string | null;
+  winnerPlayerId: string | null;
+  winnerWalletAddress: string | null;
+  mostDeathsPlayerId: string | null;
+  mostDeathsWalletAddress: string | null;
+  leaderboard: MatchLeaderboardEntry[];
+};
+
+type FinishRoomOptions = {
+  reason: MatchEndReason;
+  finishedAt?: number;
+  winnerPlayerId: string | null;
+  winnerWalletAddress: string | null;
+  mostDeathsPlayerId: string | null;
+  mostDeathsWalletAddress: string | null;
+  payoutTxHash: string | null;
+  payoutError: string | null;
+  leaderboard: MatchLeaderboardEntry[];
+};
+
 const PLAYER_SPAWN: Vec2 = { x: 800, y: 600 };
+const DEFAULT_MATCH_DURATION_SECONDS = 180;
+const MIN_MATCH_DURATION_SECONDS = 30;
+const MAX_MATCH_DURATION_SECONDS = 3600;
 const CRATE_RESPAWN_MS = 60_000;
 const WEAPON_DURATION_MS = 40_000;
 const RESPAWN_DELAY_MS = 7_000;
@@ -150,16 +191,52 @@ const MAP_BLOCKERS = (() => {
 export class RoomManager {
   private rooms = new Map<string, RoomRecord>();
 
-  createRoom(hostName: string, walletAddress?: string, maxPlayers = 4) {
-    const code = this.generateCode();
+  createRoom(hostName: string, walletAddress?: string, maxPlayers = 4, durationSeconds = DEFAULT_MATCH_DURATION_SECONDS) {
+    return this.createRoomWithOptions({
+      hostName,
+      walletAddress,
+      maxPlayers,
+      durationSeconds
+    });
+  }
+
+  createRoomWithCode(
+    code: string,
+    hostName: string,
+    walletAddress?: string,
+    maxPlayers = 4,
+    onChain: RoomOnChainState | null = null,
+    durationSeconds = DEFAULT_MATCH_DURATION_SECONDS
+  ) {
+    return this.createRoomWithOptions({
+      code,
+      hostName,
+      walletAddress,
+      maxPlayers,
+      durationSeconds,
+      onChain
+    });
+  }
+
+  private createRoomWithOptions(options: CreateRoomOptions) {
+    const code = this.normalizeRoomCode(options.code ?? this.generateCode());
+    if (this.rooms.has(code)) {
+      return {
+        error: 'Room already exists' as const
+      };
+    }
+
     const hostPlayerId = randomUUID();
     const now = Date.now();
+    const durationSeconds = this.normalizeDurationSeconds(options.durationSeconds);
 
     const room: RoomRecord = {
       code,
       hostPlayerId,
-      maxPlayers,
+      maxPlayers: options.maxPlayers ?? 4,
       status: 'lobby',
+      onChain: options.onChain ? this.cloneOnChainState(options.onChain) : null,
+      match: this.createInitialMatchState(durationSeconds),
       players: new Map(),
       crateSlots: this.createInitialCrateSlots(now),
       activeBombs: new Map(),
@@ -168,26 +245,28 @@ export class RoomManager {
       lastUpdatedAt: now
     };
 
-    const hostPlayer = this.createPlayerState(hostPlayerId, hostName, '', walletAddress, now);
+    const hostPlayer = this.createPlayerState(hostPlayerId, options.hostName, '', options.walletAddress, now);
 
     room.players.set(hostPlayerId, hostPlayer);
     this.rooms.set(code, room);
 
     return {
-      room: this.toRoomState(room),
+      room: this.toRoomState(room, now),
       hostPlayer
     };
   }
 
   getRoom(code: string) {
-    this.tick(Date.now(), false);
+    const now = Date.now();
+    this.tick(now, false);
     const room = this.rooms.get(code.toUpperCase());
-    return room ? this.toRoomState(room) : null;
+    return room ? this.toRoomState(room, now) : null;
   }
 
   listRooms() {
-    this.tick(Date.now(), false);
-    return [...this.rooms.values()].map((room) => this.toRoomState(room));
+    const now = Date.now();
+    this.tick(now, false);
+    return [...this.rooms.values()].map((room) => this.toRoomState(room, now));
   }
 
   joinRoomAsPlayer(code: string, socketId: string, name: string, walletAddress?: string) {
@@ -208,7 +287,7 @@ export class RoomManager {
     room.lastUpdatedAt = now;
 
     return {
-      room: this.toRoomState(room),
+      room: this.toRoomState(room, now),
       player
     };
   }
@@ -308,6 +387,10 @@ export class RoomManager {
     }
     this.advanceRoomTimers(room, Date.now());
 
+    if (room.status !== 'in-progress') {
+      return null;
+    }
+
     const player = room.players.get(playerId);
     if (!player) {
       return null;
@@ -328,21 +411,111 @@ export class RoomManager {
   }
 
   getRoomSnapshot(code: string) {
-    this.tick(Date.now(), false);
+    const now = Date.now();
+    this.tick(now, false);
     const room = this.rooms.get(code.toUpperCase());
-    return room ? this.toRoomState(room) : null;
+    return room ? this.toRoomState(room, now) : null;
   }
 
-  startGame(code: string) {
+  startGame(code: string, startedAt = Date.now()) {
     const room = this.rooms.get(code.toUpperCase());
     if (!room) {
       return null;
     }
-    this.advanceRoomTimers(room, Date.now());
+    this.advanceRoomTimers(room, startedAt);
 
     room.status = 'in-progress';
+    room.match.startedAt = startedAt;
+    room.match.endsAt = startedAt + (room.match.durationSeconds * 1000);
+    room.match.remainingSeconds = room.match.durationSeconds;
+    room.match.finishedAt = null;
+    room.match.winnerPlayerId = null;
+    room.match.winnerWalletAddress = null;
+    room.match.mostDeathsPlayerId = null;
+    room.match.mostDeathsWalletAddress = null;
+    room.match.endReason = null;
+    room.match.payoutTxHash = null;
+    room.match.payoutError = null;
+    room.match.leaderboard = [];
+    room.lastUpdatedAt = startedAt;
+    return this.toRoomState(room, startedAt);
+  }
+
+  setRoomOnChainStartDetails(
+    code: string,
+    startTxHash: string,
+    contracts: RoomOnChainContracts
+  ) {
+    const room = this.rooms.get(code.toUpperCase());
+    if (!room || !room.onChain) {
+      return null;
+    }
+
+    room.onChain.startTxHash = startTxHash;
+    room.onChain.contracts = { ...contracts };
     room.lastUpdatedAt = Date.now();
+
     return this.toRoomState(room);
+  }
+
+  getRoomsReadyToFinish(now = Date.now()): RoomFinishCandidate[] {
+    const candidates: RoomFinishCandidate[] = [];
+
+    for (const room of this.rooms.values()) {
+      this.advanceRoomTimers(room, now);
+      if (room.status !== 'in-progress') {
+        continue;
+      }
+
+      if (!room.match.endsAt || now < room.match.endsAt) {
+        continue;
+      }
+
+      const leaderboard = this.buildLeaderboard(room);
+      const winner = leaderboard[0] ?? null;
+      const mostDeaths = this.getMostDeathsEntry(leaderboard);
+
+      candidates.push({
+        roomCode: room.code,
+        gameManagerAddress: room.onChain?.gameManagerAddress ?? null,
+        winnerPlayerId: winner?.playerId ?? null,
+        winnerWalletAddress: winner?.walletAddress ?? null,
+        mostDeathsPlayerId: mostDeaths?.playerId ?? null,
+        mostDeathsWalletAddress: mostDeaths?.walletAddress ?? null,
+        leaderboard
+      });
+    }
+
+    return candidates;
+  }
+
+  finishGame(code: string, options: FinishRoomOptions) {
+    const room = this.rooms.get(code.toUpperCase());
+    if (!room) {
+      return null;
+    }
+
+    const finishedAt = options.finishedAt ?? Date.now();
+    this.advanceRoomTimers(room, finishedAt);
+
+    room.status = 'finished';
+    room.activeBombs.clear();
+    room.activeBulletStreams.clear();
+
+    room.match.finishedAt = finishedAt;
+    room.match.remainingSeconds = 0;
+    room.match.endsAt = room.match.endsAt ?? finishedAt;
+    room.match.winnerPlayerId = options.winnerPlayerId;
+    room.match.winnerWalletAddress = options.winnerWalletAddress;
+    room.match.mostDeathsPlayerId = options.mostDeathsPlayerId;
+    room.match.mostDeathsWalletAddress = options.mostDeathsWalletAddress;
+    room.match.endReason = options.reason;
+    room.match.payoutTxHash = options.payoutTxHash;
+    room.match.payoutError = options.payoutError;
+    room.match.leaderboard = options.leaderboard.map((entry) => ({ ...entry }));
+
+    room.lastUpdatedAt = finishedAt;
+    return this.toRoomState(room, finishedAt);
   }
 
   useWeapon(
@@ -360,6 +533,10 @@ export class RoomManager {
 
     const now = Date.now();
     this.advanceRoomTimers(room, now);
+
+    if (room.status !== 'in-progress') {
+      return { error: 'Match is not running' as const };
+    }
 
     const player = room.players.get(playerId);
     if (!player) {
@@ -441,6 +618,10 @@ export class RoomManager {
     }
     this.advanceRoomTimers(room, Date.now());
 
+    if (room.status !== 'in-progress') {
+      return null;
+    }
+
     room.lastUpdatedAt = Date.now();
 
     return {
@@ -464,6 +645,10 @@ export class RoomManager {
 
     const now = Date.now();
     this.advanceRoomTimers(room, now);
+
+    if (room.status !== 'in-progress') {
+      return { error: 'Match is not running' as const };
+    }
 
     const player = room.players.get(playerId);
     if (!player) {
@@ -525,7 +710,7 @@ export class RoomManager {
 
     for (const room of this.rooms.values()) {
       this.advanceRoomTimers(room, now);
-      if (!includeCombat) {
+      if (!includeCombat || room.status !== 'in-progress') {
         continue;
       }
 
@@ -536,12 +721,14 @@ export class RoomManager {
     return { attackEvents };
   }
 
-  private toRoomState(room: RoomRecord): RoomState {
+  private toRoomState(room: RoomRecord, now = Date.now()): RoomState {
     return {
       code: room.code,
       hostPlayerId: room.hostPlayerId,
       maxPlayers: room.maxPlayers,
       status: room.status,
+      onChain: room.onChain ? this.cloneOnChainState(room.onChain) : null,
+      match: this.cloneMatchState(room.match, now),
       players: [...room.players.values()].map((player) => ({
         ...player,
         position: { ...player.position },
@@ -554,6 +741,99 @@ export class RoomManager {
       spectators: room.spectators.size,
       lastUpdatedAt: room.lastUpdatedAt
     };
+  }
+
+  private cloneOnChainState(onChain: RoomOnChainState): RoomOnChainState {
+    return {
+      chainId: onChain.chainId,
+      gameId: onChain.gameId,
+      gameManagerAddress: onChain.gameManagerAddress,
+      createTxHash: onChain.createTxHash,
+      startTxHash: onChain.startTxHash ?? null,
+      contracts: onChain.contracts
+        ? {
+          itemRecorder: onChain.contracts.itemRecorder,
+          killRecorder: onChain.contracts.killRecorder,
+          positionRecorder: onChain.contracts.positionRecorder,
+          livePredictionMarket: onChain.contracts.livePredictionMarket,
+          staticPredictionMarket: onChain.contracts.staticPredictionMarket
+        }
+        : null
+    };
+  }
+
+  private cloneMatchState(match: RoomMatchState, now: number): RoomMatchState {
+    return {
+      durationSeconds: match.durationSeconds,
+      startedAt: match.startedAt,
+      endsAt: match.endsAt,
+      remainingSeconds: this.calculateRemainingSeconds(match, now),
+      finishedAt: match.finishedAt,
+      winnerPlayerId: match.winnerPlayerId,
+      winnerWalletAddress: match.winnerWalletAddress,
+      mostDeathsPlayerId: match.mostDeathsPlayerId,
+      mostDeathsWalletAddress: match.mostDeathsWalletAddress,
+      endReason: match.endReason,
+      payoutTxHash: match.payoutTxHash,
+      payoutError: match.payoutError,
+      leaderboard: match.leaderboard.map((entry) => ({ ...entry }))
+    };
+  }
+
+  private createInitialMatchState(durationSeconds: number): RoomMatchState {
+    return {
+      durationSeconds,
+      startedAt: null,
+      endsAt: null,
+      remainingSeconds: durationSeconds,
+      finishedAt: null,
+      winnerPlayerId: null,
+      winnerWalletAddress: null,
+      mostDeathsPlayerId: null,
+      mostDeathsWalletAddress: null,
+      endReason: null,
+      payoutTxHash: null,
+      payoutError: null,
+      leaderboard: []
+    };
+  }
+
+  private normalizeDurationSeconds(rawDuration?: number) {
+    const duration = Number.isFinite(rawDuration) ? Math.round(rawDuration as number) : DEFAULT_MATCH_DURATION_SECONDS;
+    return Math.min(MAX_MATCH_DURATION_SECONDS, Math.max(MIN_MATCH_DURATION_SECONDS, duration));
+  }
+
+  private calculateRemainingSeconds(match: RoomMatchState, now: number) {
+    if (match.finishedAt !== null) {
+      return 0;
+    }
+
+    if (!match.endsAt) {
+      return match.durationSeconds;
+    }
+
+    return Math.max(0, Math.ceil((match.endsAt - now) / 1000));
+  }
+
+  private buildLeaderboard(room: RoomRecord): MatchLeaderboardEntry[] {
+    return [...room.players.values()]
+      .map((player) => ({
+        playerId: player.id,
+        name: player.name,
+        walletAddress: player.walletAddress ?? null,
+        kills: player.kills,
+        deaths: player.deaths
+      }))
+      .sort((a, b) => (b.kills - a.kills) || (a.deaths - b.deaths) || a.name.localeCompare(b.name));
+  }
+
+  private getMostDeathsEntry(entries: MatchLeaderboardEntry[]) {
+    if (entries.length === 0) {
+      return null;
+    }
+
+    const sorted = [...entries].sort((a, b) => (b.deaths - a.deaths) || (a.kills - b.kills) || a.name.localeCompare(b.name));
+    return sorted[0] ?? null;
   }
 
   private createPlayerState(id: string, name: string, socketId: string, walletAddress?: string, now = Date.now()): PlayerState {
@@ -630,6 +910,12 @@ export class RoomManager {
         player.updatedAt = now;
         changed = true;
       }
+    }
+
+    const nextRemaining = this.calculateRemainingSeconds(room.match, now);
+    if (room.match.remainingSeconds !== nextRemaining) {
+      room.match.remainingSeconds = nextRemaining;
+      changed = true;
     }
 
     if (changed) {
@@ -1047,6 +1333,10 @@ export class RoomManager {
       createdAt: now,
       payload
     } satisfies AttackEvent;
+  }
+
+  private normalizeRoomCode(code: string) {
+    return code.trim().toUpperCase();
   }
 
   private generateCode() {

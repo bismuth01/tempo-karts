@@ -76,6 +76,7 @@ export interface ServerToClientEvents {
   'room:item': (payload: ItemEvent & { ts: number }) => void;
   'room:state': (payload: { room: RoomState; serverTime: number; tickRate: number }) => void;
   'room:game_started': (payload: { room: RoomState | null }) => void;
+  'room:game_finished': (payload: { room: RoomState | null }) => void;
 }
 
 export interface InterServerEvents {}
