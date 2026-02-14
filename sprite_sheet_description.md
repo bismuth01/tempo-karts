@@ -1,33 +1,33 @@
 # Sprite Sheet Description and Position Map
 
-## Source
-- File: `tempo-karts/public/assets/sprite-sheet.png`
-- Size: `1024 x 1536`
+## Sources
+- Main environment/UI sheet: `tempo-karts/public/assets/sprite-sheet.png` (`1024 x 1536`)
+- Kart-only sheet: `tempo-karts/public/assets/kart-sheet.png` (`1536 x 1024`)
 - Coordinate system: top-left origin
 - Format used below: `asset_name -> x, y, w, h`
 
 ## Important
 - Mapping is based on the generated sheet content (as visible in your screenshot), not the original generation prompt.
-- You are correct: the first row is red karts, second row is blue karts.
+- Karts are now moved to `kart-sheet.png` and should no longer be sourced from row 1/2 of `sprite-sheet.png`.
 - Asset names are descriptive; a few are inferred where the generator produced stylistic variants.
 
-## Row 1 (Red Kart Set)
-- `kart_red_01` -> `16, 62, 136, 90`
-- `kart_red_02` -> `177, 62, 127, 96`
-- `kart_red_03` -> `320, 63, 122, 97`
-- `kart_red_04` -> `464, 56, 96, 104`
-- `kart_red_05` -> `578, 64, 134, 95`
-- `kart_red_06` -> `735, 63, 102, 96`
-- `kart_red_07` -> `870, 65, 130, 91`
+## Kart Sheet (New, Active)
+- `kart_blue_base_down` -> `119, 375, 211, 245`
+- `kart_blue_base_down_left` -> `372, 380, 261, 234`
+- `kart_blue_base_left` -> `647, 390, 284, 232`
+- `kart_blue_base_up_left` -> `946, 377, 259, 238`
+- `kart_blue_base_up` -> `1247, 372, 211, 240`
 
-## Row 2 (Blue Kart Set)
-- `kart_blue_01` -> `16, 184, 148, 96`
-- `kart_blue_02` -> `177, 184, 130, 96`
-- `kart_blue_03` -> `319, 184, 131, 100`
-- `kart_blue_04` -> `462, 183, 99, 98`
-- `kart_blue_05` -> `571, 185, 138, 99`
-- `kart_blue_06` -> `735, 186, 105, 94`
-- `kart_blue_07` -> `863, 183, 138, 97`
+## 8 Direction Runtime Mapping (From 5 Base Sprites)
+- Index order used in code: `0=E, 1=SE, 2=S, 3=SW, 4=W, 5=NW, 6=N, 7=NE`
+- `E` -> frame `kart_blue_base_left`, `flipX=true`, `angle=0`
+- `SE` -> frame `kart_blue_base_down_left`, `flipX=true`, `angle=0`
+- `S` -> frame `kart_blue_base_down`, `flipX=false`, `angle=0`
+- `SW` -> frame `kart_blue_base_down_left`, `flipX=false`, `angle=0`
+- `W` -> frame `kart_blue_base_left`, `flipX=false`, `angle=0`
+- `NW` -> frame `kart_blue_base_up_left`, `flipX=false`, `angle=0`
+- `N` -> frame `kart_blue_base_up`, `flipX=false`, `angle=0`
+- `NE` -> frame `kart_blue_base_up_left`, `flipX=true`, `angle=0`
 
 ## Row 3 (Terrain / Track Tiles)
 - `tile_grass` -> `24, 320, 147, 134`
@@ -114,6 +114,6 @@
 - `arrow_small_07` -> `943, 1421, 41, 34`
 
 ## Practical Grouping for Game Use
-- Core racing + map: Rows 1-4
+- Core racing + map: `kart-sheet.png` + Rows 3-4
 - Combat VFX: Rows 5, 8, 9
 - HUD/icon sets by scale: Rows 6, 7, 10

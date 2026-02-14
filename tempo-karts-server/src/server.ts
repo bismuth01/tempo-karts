@@ -13,13 +13,42 @@ import type {
 } from './socket.js';
 
 const port = Number(process.env.PORT ?? 4000);
-const clientOrigin = process.env.CLIENT_ORIGIN ?? 'http://localhost:3000';
+const clientOrigins = (process.env.CLIENT_ORIGIN ?? 'http://localhost:8080,http://localhost:3000')
+  .split(',')
+  .map((origin) => origin.trim())
+  .filter(Boolean);
+
+const isOriginAllowed = (origin?: string) => {
+  if (!origin) {
+    return true;
+  }
+
+  return clientOrigins.includes(origin);
+};
 
 const app = express();
-app.use(cors({ origin: clientOrigin, credentials: true }));
+app.use(
+  cors({
+    origin: (origin, callback) => {
+      if (isOriginAllowed(origin)) {
+        callback(null, true);
+        return;
+      }
+
+      callback(new Error(`CORS blocked for origin: ${origin ?? 'unknown'}`));
+    },
+    credentials: true
+  })
+);
 app.use(express.json());
 
 const roomManager = new RoomManager();
+const positionLogEveryMs = 500;
+const lastPositionLogAt = new Map<string, number>();
+
+const logServer = (event: string, details: Record<string, unknown>) => {
+  console.log(`[${new Date().toISOString()}] [${event}]`, details);
+};
 
 app.get('/', (_req, res) => {
   res.json({ service: 'tempo-karts-server', status: 'ok' });
@@ -56,6 +85,13 @@ app.post('/api/rooms', (req, res) => {
 
   const { hostName, walletAddress, maxPlayers } = parsed.data;
   const { room, hostPlayer } = roomManager.createRoom(hostName, walletAddress, maxPlayers);
+  logServer('room:create', {
+    roomCode: room.code,
+    hostPlayerId: hostPlayer.id,
+    hostName,
+    maxPlayers,
+    walletAddress: walletAddress ?? null
+  });
 
   return res.status(201).json({ room, hostPlayer });
 });
@@ -87,7 +123,7 @@ app.post('/api/rooms/:code/start', (req, res) => {
 const server = http.createServer(app);
 const io = new Server<ClientToServerEvents, ServerToClientEvents, InterServerEvents, SocketData>(server, {
   cors: {
-    origin: clientOrigin,
+    origin: clientOrigins,
     credentials: true
   }
 });
@@ -151,6 +187,11 @@ io.on('connection', (socket) => {
       socket.join(roomCode);
       socket.data.roomCode = roomCode;
       socket.data.role = 'spectator';
+      logServer('room:join_spectator', {
+        roomCode,
+        socketId: socket.id,
+        spectators: joined.room.spectators
+      });
 
       ack?.({ ok: true, room: joined.room, role: 'spectator' });
       socket.emit('room:joined', { room: joined.room, role: 'spectator' });
@@ -170,6 +211,12 @@ io.on('connection', (socket) => {
         socket.data.roomCode = roomCode;
         socket.data.role = 'player';
         socket.data.playerId = data.playerId;
+        logServer('room:join_host', {
+          roomCode,
+          socketId: socket.id,
+          playerId: data.playerId,
+          players: room.players.length
+        });
 
         ack?.({ ok: true, room, playerId: data.playerId, role: 'player' });
         socket.emit('room:joined', { room, playerId: data.playerId, role: 'player' });
@@ -194,6 +241,13 @@ io.on('connection', (socket) => {
     socket.data.roomCode = roomCode;
     socket.data.role = 'player';
     socket.data.playerId = joined.player.id;
+    logServer('room:join_player', {
+      roomCode,
+      socketId: socket.id,
+      playerId: joined.player.id,
+      playerName: joined.player.name,
+      players: joined.room.players.length
+    });
 
     ack?.({ ok: true, room: joined.room, player: joined.player, role: 'player' });
     socket.emit('room:joined', { room: joined.room, player: joined.player, role: 'player' });
@@ -226,6 +280,11 @@ io.on('connection', (socket) => {
     if (leave.playerId) {
       io.to(roomCode).emit('room:player_left', { roomCode, playerId: leave.playerId });
     }
+    logServer('room:leave', {
+      roomCode,
+      socketId: socket.id,
+      playerId: leave.playerId ?? null
+    });
 
     ack?.({ ok: true });
   });
@@ -257,6 +316,21 @@ io.on('connection', (socket) => {
       hp,
       ts: ts ?? Date.now()
     });
+
+    const now = Date.now();
+    const logKey = `${updated.roomCode}:${playerId}`;
+    const lastLogAt = lastPositionLogAt.get(logKey) ?? 0;
+    if (now - lastLogAt >= positionLogEveryMs) {
+      lastPositionLogAt.set(logKey, now);
+      logServer('player:position', {
+        roomCode: updated.roomCode,
+        playerId,
+        x: Math.round(position.x),
+        y: Math.round(position.y),
+        vx: Math.round((velocity?.x ?? 0) * 10) / 10,
+        vy: Math.round((velocity?.y ?? 0) * 10) / 10
+      });
+    }
   });
 
   socket.on('player:attack', (raw) => {
@@ -300,10 +374,16 @@ io.on('connection', (socket) => {
   socket.on('disconnect', () => {
     const result = roomManager.removeSocket(socket.id);
     if (!result || !result.playerId) {
+      logServer('socket:disconnect', { socketId: socket.id, reason: 'no-player' });
       return;
     }
 
     io.to(result.roomCode).emit('room:player_left', {
+      roomCode: result.roomCode,
+      playerId: result.playerId
+    });
+    logServer('socket:disconnect', {
+      socketId: socket.id,
       roomCode: result.roomCode,
       playerId: result.playerId
     });

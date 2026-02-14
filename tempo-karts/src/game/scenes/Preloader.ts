@@ -1,14 +1,11 @@
 import { Scene } from 'phaser';
 
-export class Preloader extends Scene
-{
-    constructor ()
-    {
+export class Preloader extends Scene {
+    constructor() {
         super('Preloader');
     }
 
-    init ()
-    {
+    init() {
         const { width, height } = this.scale;
         const centerX = width / 2;
         const centerY = height / 2;
@@ -25,47 +22,31 @@ export class Preloader extends Scene
         //  Use the 'progress' event emitted by the LoaderPlugin to update the loading bar
         this.load.on('progress', (progress: number) => {
 
-            //  Update the progress bar (our bar is 464px wide, so 100% = 464px)
+            //  Update the progress bar (our bar is 460px wide, so 100% = 460px)
             bar.width = 4 + (460 * progress);
 
         });
     }
 
-    preload ()
-    {
+    preload() {
         //  Load the assets for the game
         this.load.setPath('assets');
 
         this.load.image('logo', 'logo.png');
-        this.load.image('star', 'star.png');
         this.load.image('sprite-sheet', 'sprite-sheet.png');
+        this.load.image('kart-sheet', 'kart-sheet.png');
     }
 
-    create ()
-    {
+    create() {
         this.buildSpriteSheetFrames();
+        this.buildKartSheetFrames();
 
         this.scene.start('MainMenu');
     }
 
-    private buildSpriteSheetFrames ()
-    {
+    private buildSpriteSheetFrames() {
         const texture = this.textures.get('sprite-sheet');
         const frames: Array<[string, number, number, number, number]> = [
-            ['kart_red_01', 16, 62, 136, 90],
-            ['kart_red_02', 177, 62, 127, 96],
-            ['kart_red_03', 320, 63, 122, 97],
-            ['kart_red_04', 464, 56, 96, 104],
-            ['kart_red_05', 578, 64, 134, 95],
-            ['kart_red_06', 735, 63, 102, 96],
-            ['kart_red_07', 870, 65, 130, 91],
-            ['kart_blue_01', 16, 184, 148, 96],
-            ['kart_blue_02', 177, 184, 130, 96],
-            ['kart_blue_03', 319, 184, 131, 100],
-            ['kart_blue_04', 462, 183, 99, 98],
-            ['kart_blue_05', 571, 185, 138, 99],
-            ['kart_blue_06', 735, 186, 105, 94],
-            ['kart_blue_07', 863, 183, 138, 97],
             ['tile_grass', 24, 320, 147, 134],
             ['tile_dirt', 186, 321, 150, 135],
             ['tile_start_checker', 350, 322, 154, 133],
@@ -137,8 +118,24 @@ export class Preloader extends Scene
         ];
 
         frames.forEach(([name, x, y, w, h]) => {
-            if (!texture.has(name))
-            {
+            if (!texture.has(name)) {
+                texture.add(name, 0, x, y, w, h);
+            }
+        });
+    }
+
+    private buildKartSheetFrames() {
+        const texture = this.textures.get('kart-sheet');
+        const frames: Array<[string, number, number, number, number]> = [
+            ['kart_blue_base_down', 119, 375, 211, 245],
+            ['kart_blue_base_down_left', 372, 380, 261, 234],
+            ['kart_blue_base_left', 647, 390, 284, 232],
+            ['kart_blue_base_up_left', 946, 377, 259, 238],
+            ['kart_blue_base_up', 1247, 372, 211, 240]
+        ];
+
+        frames.forEach(([name, x, y, w, h]) => {
+            if (!texture.has(name)) {
                 texture.add(name, 0, x, y, w, h);
             }
         });

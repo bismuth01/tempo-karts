@@ -1,10 +1,7 @@
 import { EventBus } from '../EventBus';
 import { Scene } from 'phaser';
-
-type DirectionFrame = {
-    frame: string;
-    flipX: boolean;
-};
+import type { MultiplayerSession, PlayerState, PositionPayload, RoomState } from '../net/multiplayer';
+import { applyDirectionPose, getDirectionPoseIndex } from '../kartDirection';
 
 export class Game extends Scene
 {
@@ -31,19 +28,19 @@ export class Game extends Scene
 
     private readonly speed = 420;
 
-    // 8-way mapping using the available 7 blue frames.
-    // Frame order from sprite sheet spin sequence is:
-    // 01 E, 02 SE, 03 S, 04 SW, 05 W, 06 NW, 07 N, and NE mirrors NW.
-    private readonly directionFrames: DirectionFrame[] = [
-        { frame: 'kart_blue_01', flipX: false }, // E
-        { frame: 'kart_blue_02', flipX: false }, // SE
-        { frame: 'kart_blue_03', flipX: false }, // S
-        { frame: 'kart_blue_04', flipX: false }, // SW
-        { frame: 'kart_blue_05', flipX: false }, // W
-        { frame: 'kart_blue_06', flipX: false }, // NW
-        { frame: 'kart_blue_07', flipX: false }, // N
-        { frame: 'kart_blue_06', flipX: true }   // NE (mirrored)
-    ];
+    private multiplayerSession?: MultiplayerSession;
+    private multiplayerTornDown = false;
+    private remotePlayers = new Map<string, Phaser.GameObjects.Sprite>();
+    private lastPositionSentAt = 0;
+    private readonly positionSendIntervalMs = 60;
+    private roomCodeText?: Phaser.GameObjects.Text;
+    private leaderboardTitleText?: Phaser.GameObjects.Text;
+    private leaderboardText?: Phaser.GameObjects.Text;
+    private localScoreTitleText?: Phaser.GameObjects.Text;
+    private localScoreText?: Phaser.GameObjects.Text;
+    private controlsHintText?: Phaser.GameObjects.Text;
+    private escapeKey?: Phaser.Input.Keyboard.Key;
+    private isExiting = false;
 
     constructor ()
     {
@@ -52,6 +49,9 @@ export class Game extends Scene
 
     create ()
     {
+        this.multiplayerTornDown = false;
+        this.isExiting = false;
+
         this.physics.world.setBounds(0, 0, this.worldWidth, this.worldHeight);
         this.cameras.main.setBounds(0, 0, this.worldWidth, this.worldHeight);
 
@@ -61,14 +61,23 @@ export class Game extends Scene
         this.createPlayer();
         this.setupInput();
         this.setupCamera();
+        this.createHud();
+        this.setupMultiplayer();
 
         this.physics.add.collider(this.player, this.wallGroup);
+        this.events.once('shutdown', this.onSceneShutdown);
 
         EventBus.emit('current-scene-ready', this);
     }
 
-    update ()
+    update (time: number)
     {
+        if (this.escapeKey && Phaser.Input.Keyboard.JustDown(this.escapeKey))
+        {
+            this.exitToMainMenu();
+            return;
+        }
+
         const movingLeft = this.cursors.left.isDown || this.wasd.A.isDown;
         const movingRight = this.cursors.right.isDown || this.wasd.D.isDown;
         const movingUp = this.cursors.up.isDown || this.wasd.W.isDown;
@@ -80,19 +89,297 @@ export class Game extends Scene
         if (rawX === 0 && rawY === 0)
         {
             this.player.setVelocity(0, 0);
-
+            this.sendLocalPosition(time);
             return;
         }
 
         const vector = new Phaser.Math.Vector2(rawX, rawY).normalize();
         this.player.setVelocity(vector.x * this.speed, vector.y * this.speed);
-
-        this.updateKartDirection(vector.x, vector.y);
+        this.applyDirectionToSprite(this.player, vector.x, vector.y);
+        this.sendLocalPosition(time);
     }
 
     changeScene ()
     {
         this.scene.start('GameOver');
+    }
+
+    private onSceneShutdown = () =>
+    {
+        this.teardownMultiplayer();
+    };
+
+    private exitToMainMenu ()
+    {
+        if (this.isExiting)
+        {
+            return;
+        }
+
+        this.isExiting = true;
+        this.teardownMultiplayer();
+        this.scene.start('MainMenu');
+    }
+
+    private setupMultiplayer ()
+    {
+        const session = this.registry.get('multiplayer:session') as MultiplayerSession | undefined;
+
+        if (!session?.socket || !session.roomCode || !session.playerId)
+        {
+            return;
+        }
+
+        this.multiplayerSession = session;
+        const localSnapshot = session.room.players.find((player) => player.id === session.playerId);
+        if (localSnapshot)
+        {
+            this.player.setPosition(localSnapshot.position.x, localSnapshot.position.y);
+            this.applyDirectionToSprite(this.player, localSnapshot.velocity.x, localSnapshot.velocity.y);
+        }
+
+        this.bindMultiplayerEvents();
+        this.hydrateRemotePlayersFromRoom(session.room);
+        this.setRoomConnectionStatus(session.roomCode, true);
+        this.refreshHudFromRoom(session.room);
+        this.sendLocalPosition(this.time.now, true);
+    }
+
+    private bindMultiplayerEvents ()
+    {
+        if (!this.multiplayerSession)
+        {
+            return;
+        }
+
+        const { socket } = this.multiplayerSession;
+
+        socket.on('room:position', this.handleRoomPosition);
+        socket.on('room:state', this.handleRoomState);
+        socket.on('room:player_joined', this.handlePlayerJoined);
+        socket.on('room:player_left', this.handlePlayerLeft);
+        socket.on('disconnect', this.handleSocketDisconnect);
+    }
+
+    private unbindMultiplayerEvents ()
+    {
+        if (!this.multiplayerSession)
+        {
+            return;
+        }
+
+        const { socket } = this.multiplayerSession;
+
+        socket.off('room:position', this.handleRoomPosition);
+        socket.off('room:state', this.handleRoomState);
+        socket.off('room:player_joined', this.handlePlayerJoined);
+        socket.off('room:player_left', this.handlePlayerLeft);
+        socket.off('disconnect', this.handleSocketDisconnect);
+    }
+
+    private handleRoomPosition = (payload: PositionPayload) =>
+    {
+        const session = this.multiplayerSession;
+        if (!session || payload.roomCode !== session.roomCode || payload.playerId === session.playerId)
+        {
+            return;
+        }
+
+        const remote = this.ensureRemotePlayer(payload.playerId, payload.position.x, payload.position.y);
+        const deltaX = payload.velocity?.x ?? payload.position.x - remote.x;
+        const deltaY = payload.velocity?.y ?? payload.position.y - remote.y;
+
+        remote.setPosition(payload.position.x, payload.position.y);
+        this.applyDirectionToSprite(remote, deltaX, deltaY);
+    };
+
+    private handleRoomState = (payload: { room: RoomState; serverTime: number; tickRate: number }) =>
+    {
+        const session = this.multiplayerSession;
+        if (!session || payload.room.code !== session.roomCode)
+        {
+            return;
+        }
+
+        session.room = payload.room;
+        this.hydrateRemotePlayersFromRoom(payload.room);
+        this.refreshHudFromRoom(payload.room);
+    };
+
+    private handlePlayerJoined = (payload: { roomCode: string; player?: PlayerState; playerId?: string }) =>
+    {
+        const session = this.multiplayerSession;
+        if (!session || payload.roomCode !== session.roomCode)
+        {
+            return;
+        }
+
+        const joinedPlayer = payload.player;
+        if (joinedPlayer && joinedPlayer.id !== session.playerId)
+        {
+            const alreadyInRoom = session.room.players.some((player) => player.id === joinedPlayer.id);
+            if (!alreadyInRoom)
+            {
+                session.room.players.push(joinedPlayer);
+            }
+
+            const remote = this.ensureRemotePlayer(joinedPlayer.id, joinedPlayer.position.x, joinedPlayer.position.y);
+            this.applyDirectionToSprite(remote, joinedPlayer.velocity.x, joinedPlayer.velocity.y);
+        }
+
+        this.refreshHudFromRoom(session.room);
+    };
+
+    private handlePlayerLeft = (payload: { roomCode: string; playerId: string }) =>
+    {
+        const session = this.multiplayerSession;
+        if (!session || payload.roomCode !== session.roomCode)
+        {
+            return;
+        }
+
+        this.removeRemotePlayer(payload.playerId);
+        session.room.players = session.room.players.filter((player) => player.id !== payload.playerId);
+        this.refreshHudFromRoom(session.room);
+    };
+
+    private handleSocketDisconnect = () =>
+    {
+        const roomCode = this.multiplayerSession?.roomCode ?? '----';
+        this.setRoomConnectionStatus(roomCode, false);
+    };
+
+    private hydrateRemotePlayersFromRoom (room: RoomState)
+    {
+        const session = this.multiplayerSession;
+        if (!session)
+        {
+            return;
+        }
+
+        const remoteIds = new Set<string>();
+
+        room.players.forEach((player) => {
+            if (player.id === session.playerId)
+            {
+                return;
+            }
+
+            remoteIds.add(player.id);
+            const remote = this.ensureRemotePlayer(player.id, player.position.x, player.position.y);
+            this.applyDirectionToSprite(remote, player.velocity.x, player.velocity.y);
+        });
+
+        for (const playerId of this.remotePlayers.keys())
+        {
+            if (!remoteIds.has(playerId))
+            {
+                this.removeRemotePlayer(playerId);
+            }
+        }
+    }
+
+    private ensureRemotePlayer (playerId: string, x: number, y: number)
+    {
+        let remote = this.remotePlayers.get(playerId);
+        if (!remote)
+        {
+            remote = this.add.sprite(x, y, 'kart-sheet', 'kart_blue_base_down')
+                .setScale(0.56)
+                .setDepth(28);
+            this.remotePlayers.set(playerId, remote);
+        }
+
+        return remote;
+    }
+
+    private removeRemotePlayer (playerId: string)
+    {
+        const remote = this.remotePlayers.get(playerId);
+        if (!remote)
+        {
+            return;
+        }
+
+        remote.destroy();
+        this.remotePlayers.delete(playerId);
+    }
+
+    private sendLocalPosition (time: number, force = false)
+    {
+        const session = this.multiplayerSession;
+        if (!session || !session.socket.connected)
+        {
+            return;
+        }
+
+        if (!force && time - this.lastPositionSentAt < this.positionSendIntervalMs)
+        {
+            return;
+        }
+
+        const body = this.player.body as Phaser.Physics.Arcade.Body;
+
+        const payload: PositionPayload = {
+            roomCode: session.roomCode,
+            playerId: session.playerId,
+            position: {
+                x: this.player.x,
+                y: this.player.y
+            },
+            velocity: {
+                x: body.velocity.x,
+                y: body.velocity.y
+            },
+            rotation: this.player.rotation,
+            ts: Date.now()
+        };
+
+        session.socket.emit('player:position', payload);
+        this.lastPositionSentAt = time;
+    }
+
+    private teardownMultiplayer ()
+    {
+        if (this.multiplayerTornDown)
+        {
+            return;
+        }
+
+        this.multiplayerTornDown = true;
+        this.unbindMultiplayerEvents();
+
+        if (this.multiplayerSession?.socket.connected)
+        {
+            this.multiplayerSession.socket.emit('room:leave', {
+                roomCode: this.multiplayerSession.roomCode,
+                playerId: this.multiplayerSession.playerId
+            });
+            this.multiplayerSession.socket.disconnect();
+        }
+
+        this.registry.remove('multiplayer:session');
+        this.multiplayerSession = undefined;
+        this.lastPositionSentAt = 0;
+
+        this.remotePlayers.forEach((remotePlayer) => remotePlayer.destroy());
+        this.remotePlayers.clear();
+
+        [
+            this.roomCodeText,
+            this.leaderboardTitleText,
+            this.leaderboardText,
+            this.localScoreTitleText,
+            this.localScoreText,
+            this.controlsHintText
+        ].forEach((hudText) => hudText?.destroy());
+
+        this.roomCodeText = undefined;
+        this.leaderboardTitleText = undefined;
+        this.leaderboardText = undefined;
+        this.localScoreTitleText = undefined;
+        this.localScoreText = undefined;
+        this.controlsHintText = undefined;
     }
 
     private buildGround ()
@@ -242,22 +529,23 @@ export class Game extends Scene
         const spawnX = this.arena.x + this.arena.width / 2;
         const spawnY = this.arena.y + this.arena.height / 2;
 
-        this.player = this.physics.add.sprite(spawnX, spawnY, 'sprite-sheet', 'kart_blue_01')
-            .setScale(1.35)
+        this.player = this.physics.add.sprite(spawnX, spawnY, 'kart-sheet', 'kart_blue_base_down')
+            .setScale(0.56)
             .setDepth(30);
 
         this.player.setCollideWorldBounds(true);
 
         const body = this.player.body as Phaser.Physics.Arcade.Body;
-        body.setSize(56, 56, true);
-        body.setOffset((this.player.width - 56) / 2, (this.player.height - 56) / 2);
+        body.setSize(68, 68, true);
+        body.setOffset((this.player.width - 68) / 2, (this.player.height - 68) / 2);
 
-        this.player.setFrame('kart_blue_01');
+        this.player.setFrame('kart_blue_base_down');
     }
 
     private setupInput ()
     {
         this.cursors = this.input.keyboard!.createCursorKeys();
+        this.escapeKey = this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.ESC);
 
         this.wasd = this.input.keyboard!.addKeys({
             W: Phaser.Input.Keyboard.KeyCodes.W,
@@ -272,6 +560,134 @@ export class Game extends Scene
         };
     }
 
+    private createHud ()
+    {
+        const { width, height } = this.scale;
+
+        this.add.rectangle(width / 2, 60, width, 120, 0x0a0503, 0.42)
+            .setDepth(110)
+            .setScrollFactor(0);
+        this.add.rectangle(width / 2, height - 22, width, 44, 0x0a0503, 0.34)
+            .setDepth(110)
+            .setScrollFactor(0);
+
+        this.roomCodeText = this.add.text(22, height - 22, 'ROOM: ---- • OFFLINE', {
+            fontFamily: 'Cinzel',
+            fontSize: '20px',
+            color: '#f9e6bd',
+            stroke: '#2a170d',
+            strokeThickness: 4
+        }).setOrigin(0, 0.5).setDepth(120).setScrollFactor(0);
+
+        this.controlsHintText = this.add.text(width / 2, height - 22, 'WASD / Arrow Keys to drive  •  ESC to return menu', {
+            fontFamily: 'Cinzel',
+            fontSize: '19px',
+            color: '#f9e6bd',
+            stroke: '#2a170d',
+            strokeThickness: 4
+        }).setOrigin(0.5, 0.5).setDepth(120).setScrollFactor(0);
+
+        this.leaderboardTitleText = this.add.text(22, 12, 'LEADERBOARD', {
+            fontFamily: 'Cinzel',
+            fontStyle: 'bold',
+            fontSize: '24px',
+            color: '#f9e6bd',
+            stroke: '#2a170d',
+            strokeThickness: 4
+        }).setOrigin(0, 0).setDepth(120).setScrollFactor(0);
+
+        this.leaderboardText = this.add.text(22, 40, 'Waiting for players...', {
+            fontFamily: 'Cinzel',
+            fontSize: '18px',
+            color: '#f2d9aa',
+            stroke: '#2a170d',
+            strokeThickness: 3,
+            lineSpacing: 2
+        }).setOrigin(0, 0).setDepth(120).setScrollFactor(0);
+
+        this.localScoreTitleText = this.add.text(width - 22, 12, 'YOUR SCORE', {
+            fontFamily: 'Cinzel',
+            fontStyle: 'bold',
+            fontSize: '24px',
+            color: '#f9e6bd',
+            stroke: '#2a170d',
+            strokeThickness: 4
+        }).setOrigin(1, 0).setDepth(120).setScrollFactor(0);
+
+        this.localScoreText = this.add.text(width - 22, 40, 'Kills: 0\nDeaths: 0\nK/D: 0.00', {
+            fontFamily: 'Cinzel',
+            fontSize: '19px',
+            color: '#f2d9aa',
+            stroke: '#2a170d',
+            strokeThickness: 3,
+            align: 'right',
+            lineSpacing: 2
+        }).setOrigin(1, 0).setDepth(120).setScrollFactor(0);
+    }
+
+    private setRoomConnectionStatus (roomCode: string, isOnline: boolean)
+    {
+        if (!this.roomCodeText)
+        {
+            return;
+        }
+
+        const status = isOnline ? 'ONLINE' : 'OFFLINE';
+        this.roomCodeText.setText(`ROOM: ${roomCode} • ${status}`);
+    }
+
+    private refreshHudFromRoom (room: RoomState)
+    {
+        const session = this.multiplayerSession;
+        if (!session)
+        {
+            return;
+        }
+
+        this.setRoomConnectionStatus(room.code, session.socket.connected);
+
+        const rankedPlayers = [...room.players].sort((a, b) =>
+            (b.kills - a.kills) ||
+            (a.deaths - b.deaths) ||
+            a.name.localeCompare(b.name)
+        );
+
+        if (this.leaderboardText)
+        {
+            const lines = rankedPlayers.map((player, index) => {
+                const label = this.trimPlayerName(player.name, 12);
+                const marker = player.id === session.playerId ? '>' : ' ';
+                return `${marker}${index + 1}. ${label}  K:${player.kills} D:${player.deaths}`;
+            });
+            this.leaderboardText.setText(lines.length > 0 ? lines.join('\n') : 'No players in room');
+        }
+
+        if (this.localScoreText)
+        {
+            const me = room.players.find((player) => player.id === session.playerId);
+            if (!me)
+            {
+                this.localScoreText.setText('Kills: 0\nDeaths: 0\nK/D: 0.00');
+                return;
+            }
+
+            const kd = me.deaths === 0 ? me.kills : me.kills / me.deaths;
+            this.localScoreText.setText(
+                `Kills: ${me.kills}\nDeaths: ${me.deaths}\nK/D: ${kd.toFixed(2)}`
+            );
+        }
+    }
+
+    private trimPlayerName (name: string, maxChars: number)
+    {
+        if (name.length <= maxChars)
+        {
+            return name;
+        }
+
+        return `${name.slice(0, Math.max(1, maxChars - 3))}...`;
+    }
+
     private setupCamera ()
     {
         this.cameras.main.startFollow(this.player, true, 0.1, 0.1);
@@ -279,16 +695,14 @@ export class Game extends Scene
         this.cameras.main.setDeadzone(220, 130);
     }
 
-    private updateKartDirection (dx: number, dy: number)
+    private applyDirectionToSprite (sprite: Phaser.GameObjects.Sprite, dx: number, dy: number)
     {
-        // Convert movement vector into one of 8 sectors.
-        const angle = Math.atan2(dy, dx);
-        const sector = Math.round(angle / (Math.PI / 4));
-        const index = (sector + 8) % 8;
+        const poseIndex = getDirectionPoseIndex(dx, dy);
+        if (poseIndex === null)
+        {
+            return;
+        }
 
-        const direction = this.directionFrames[index];
-
-        this.player.setFrame(direction.frame);
-        this.player.setFlipX(direction.flipX);
+        applyDirectionPose(sprite, poseIndex);
     }
 }
